@@ -23,7 +23,7 @@
 **安装说明**  
 选一个文件夹作为安装文件夹  
 安装虚拟环境:`python3 -m venv venv`  
-激活虚拟环境：`source .venv/bin/activate`  
+激活虚拟环境：`source venv/bin/activate`  
 安装：`pip install nb-cli nonebot2 nonebot-adapter-onebot`  
 创建项目：`nb create`   
 创建项目时候是可视化交互，选择**OneBot V11**协议；然后选择**Current project**，也就是当前目录，其他自行研究  

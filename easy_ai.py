@@ -110,7 +110,7 @@ async def get_dynamic_history_length(group_id: int) -> int:
         f"你是一个用于判断群聊上下文长度的控制程序。以下是当前群聊最近2小时的活跃度统计：\n"
         f"[{stats_text}]\n"
         f"这是两个和一个ai组成的群，你需要决定接下来我需要提取多少条历史记录作为上下文给大模型。"
-        f"要求短时间内信息多的话尽可能包括半小时到一小时的数据，相反可以小一些，数字最大可以到1000甚至更多。"
+        f"要求短时间内信息多的话尽可能包括半小时到一小时的数据;相反可以小一些，控制在150左右；数字最大可以到1000甚至更多。"
         f"请只回复一个纯数字，不要包含任何其他字符！"
     )
 
@@ -269,6 +269,7 @@ async def handle_gemini_chat(bot: Bot, event: Event):
 
     user_input = event.get_plaintext().strip()
     if not user_input:
+        await chat_handler.finish(MessageSegment.at(event.user_id)+" 何意味")
         return
 
     selected_model_key = "default"
@@ -283,7 +284,7 @@ async def handle_gemini_chat(bot: Bot, event: Event):
     current_api_url = model_config["api_url"]
 
     if not user_input:
-        await chat_handler.finish(f"你选择了：{model_config['name']}，但没有输入要问的问题哦！")
+        await chat_handler.finish(MessageSegment.at(event.user_id)+f" （模型：{model_config['name']}）你没有输入要问的问题哦！")
 
     # 快速回复一条
     ack_msg = MessageSegment.at(event.user_id) + MessageSegment.text(
@@ -366,10 +367,10 @@ async def handle_gemini_chat(bot: Bot, event: Event):
     # 发送请求并根据格式解析返回结果
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(current_api_url, headers=headers, json=payload, timeout=180) as resp:
+            async with session.post(current_api_url, headers=headers, json=payload, timeout=300) as resp:
                 if resp.status != 200:
                     err_msg = await resp.text()
-                    await chat_handler.finish(f"请求失败，状态码: {resp.status}。错误信息: {err_msg}")
+                    await chat_handler.finish(MessageSegment.at(event.user_id)+f"\n请求失败，状态码: {resp.status}。错误信息: {err_msg}")
                     return
 
                 data = await resp.json()
@@ -389,4 +390,4 @@ async def handle_gemini_chat(bot: Bot, event: Event):
     except FinishedException:
         raise
     except Exception as e:
-        await chat_handler.finish(f"调用出错啦：{e}")
+        await chat_handler.finish(MessageSegment.at(event.user_id)+f"\n调用出错啦：{e}")

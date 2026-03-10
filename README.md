@@ -15,7 +15,7 @@
 运行`curl -o napcat.sh https://nclatest.znin.net/NapNeko/NapCat-Installer/main/script/install.sh && bash napcat.sh --docker n --cli y`  
 参数解释：安装TUI-CLI、不使用docker  
 安装安成后直接运行`napcat`进入可视化界面，配置QQ号，启用ws反代，设置地址、端口和token即可（这里需要和下面的nonebot一致）  
-比如：`ws://127.0.0.1:8080/onebot/v11/ws`
+比如：`ws://127.0.0.1:8082/onebot/v11/ws`
 
 ### nonebot安装及配置
 官方文档：https://nonebot.dev/docs/  

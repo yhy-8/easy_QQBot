@@ -25,10 +25,11 @@
 安装虚拟环境:`python3 -m venv venv`  
 激活虚拟环境：`source .venv/bin/activate`  
 安装：`pip install nb-cli nonebot2 nonebot-adapter-onebot`  
-安装的时候是可视化交互，选择**OneBot V11**协议；然后选择**Current project**，也就是当前目录，其他自行研究  
+创建项目：`nb create`   
+创建项目时候是可视化交互，选择**OneBot V11**协议；然后选择**Current project**，也就是当前目录，其他自行研究  
 
 **配置说明**  
-去到nonebot安装目录下，找到`.env`文件,在其中添加或修改
+去到nonebot安装目录下，找到`.env`文件,在其中添加
 ```commandline
 HOST=127.0.0.1
 PORT=8082

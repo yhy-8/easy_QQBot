@@ -1,6 +1,6 @@
 import aiohttp
 import datetime
-import sqlite3
+import aiosqlite
 import re
 import asyncio
 from nonebot import on_message, get_driver
@@ -43,50 +43,47 @@ MODELS_CONFIG = {
 
 
 # ========== 数据库初始化 ==========
-def init_db():
-    conn = sqlite3.connect(DB_PATH, timeout=15.0)
-    cursor = conn.cursor()
+driver = get_driver()
+@driver.on_startup
+async def init_db():
+    async with aiosqlite.connect(DB_PATH, timeout=15.0) as db:
+        # 开启 WAL 模式
+        await db.execute('PRAGMA journal_mode=WAL;')
 
-    # 开启 WAL 模式，极大提升并发读写性能，减少锁冲突
-    cursor.execute('PRAGMA journal_mode=WAL;')
+        for group_id in ALLOWED_GROUPS:
+            table_name = f"group_{group_id}"
+            await db.execute(f'''
+                CREATE TABLE IF NOT EXISTS "{table_name}" (
+                    message_id TEXT UNIQUE,
+                    timestamp INTEGER,
+                    sender_name TEXT,
+                    content TEXT
+                )
+            ''')
+        await db.commit()
+    print("[AI Chat] 数据库初始化完成")
 
-    for group_id in ALLOWED_GROUPS:
-        # 表名格式：group_1058510795
-        table_name = f"group_{group_id}"
-
-        # 为每个群创建独立的表，message_id 设为唯一约束
-        cursor.execute(f'''
-            CREATE TABLE IF NOT EXISTS "{table_name}" (
-                message_id TEXT UNIQUE,
-                timestamp INTEGER,
-                sender_name TEXT,
-                content TEXT
-            )
-        ''')
-
-    conn.commit()
-    conn.close()
-
-
-init_db()
 
 # ========== 辅助函数：动态获取聊天记录数 ==========
 async def get_dynamic_history_length(group_id: int) -> int:
     """统计近期消息密度并让大模型决定要读取的历史消息数量"""
-    conn = sqlite3.connect(DB_PATH, timeout=15.0)
-    cursor = conn.cursor()
+    default=80 #默认值
+
     table_name = f"group_{group_id}"
     now_ts = int(datetime.datetime.now().timestamp())
-
+    rows = []
     try:
-        # 抓取过去 2 小时内的所有消息时间戳
-        cursor.execute(f'SELECT timestamp FROM "{table_name}" WHERE timestamp > ? ORDER BY timestamp DESC',
-                       (now_ts - 7200,))
-        rows = cursor.fetchall()
-    except sqlite3.OperationalError:
+        async with aiosqlite.connect(DB_PATH, timeout=15.0) as db:
+            async with db.execute(f'SELECT timestamp FROM "{table_name}" WHERE timestamp > ? ORDER BY timestamp DESC',
+                                  (now_ts - 7200,)) as cursor:
+                rows = await cursor.fetchall()
+    except Exception as e:  # 捕获 aiosqlite 的异常
+        print(f"[AI Chat]数据库查询异常 {e}")
         rows = []
-    finally:
-        conn.close()
+
+    # 如果两小时内没有任何消息，直接返回兜底值，不浪费 API Token
+    if not rows:
+        return default
 
     # 统计各个时间段的消息量
     stats = {
@@ -146,7 +143,7 @@ async def get_dynamic_history_length(group_id: int) -> int:
         print(f"[AI Chat] 获取动态上下文长度失败: {e}")
 
     # 如果请求失败或没有拿到数字，返回一个默认值
-    return 80
+    return default
 
 
 # ========== 辅助函数：解析消息为纯文本/占位符 ==========
@@ -191,33 +188,23 @@ def parse_message_content(raw_message) -> str:
     return "".join(text_parts).strip()
 
 
-# ========== 辅助函数：写入数据库 ==========
-def insert_message_to_db(msg_id, group_id, timestamp, sender_name, content):
-    if not content:
-        return
-
-    # 只有在白名单内的群才记录（安全过滤）
-    if group_id not in ALLOWED_GROUPS:
+# ========== 辅助函数：异步写入数据库 ==========
+async def insert_message_to_db(msg_id, group_id, timestamp, sender_name, content):
+    if not content or group_id not in ALLOWED_GROUPS:
         return
 
     table_name = f"group_{group_id}"
-    conn = sqlite3.connect(DB_PATH, timeout=15.0)
-    cursor = conn.cursor()
     try:
-        # 使用动态表名，数据部分依然使用 ? 占位符
-        sql = f'INSERT OR IGNORE INTO "{table_name}" (message_id, timestamp, sender_name, content) VALUES (?, ?, ?, ?)'
-        cursor.execute(sql, (str(msg_id), int(timestamp), sender_name, content))
-        conn.commit()
+        async with aiosqlite.connect(DB_PATH, timeout=15.0) as db:
+            sql = f'INSERT OR IGNORE INTO "{table_name}" (message_id, timestamp, sender_name, content) VALUES (?, ?, ?, ?)'
+            await db.execute(sql, (str(msg_id), int(timestamp), sender_name, content))
+            await db.commit()
     except Exception as e:
-        print(f"[数据库错误] 写入表 {table_name} 失败: {e}")
-    finally:
-        conn.close()
+        print(f"[AI Chat] 数据库错误，异步写入表 {table_name} 失败: {e}")
 
 
 # ========== 1. 机器人启动时自动拉取同步历史记录 ==========
 driver = get_driver()
-
-
 @driver.on_bot_connect
 async def sync_history_on_startup(bot: Bot):
     for group_id in ALLOWED_GROUPS:
@@ -235,7 +222,7 @@ async def sync_history_on_startup(bot: Bot):
                     content = parse_message_content(msg.get("message", ""))
 
                     if msg_id and content:
-                        insert_message_to_db(msg_id, group_id, timestamp, sender_name, content)
+                        await insert_message_to_db(msg_id, group_id, timestamp, sender_name, content)
                         success_count += 1
                 except Exception as inner_e:
                     print(f"[AI Chat] 解析单条历史消息失败: {inner_e}")
@@ -258,14 +245,14 @@ async def record_chat_history(event: Event):
     sender_name = event.sender.nickname if event.sender and event.sender.nickname else str(event.user_id)
     content = parse_message_content(event.message)
 
-    insert_message_to_db(event.message_id, event.group_id, event.time, sender_name, content)
+    await insert_message_to_db(event.message_id, event.group_id, event.time, sender_name, content)
 
 
 # ========== 3. 处理用户的 @ 提问 ==========
 chat_handler = on_message(rule=to_me(), priority=50, block=True)
 
 @chat_handler.handle()
-async def handle_gemini_chat(bot: Bot, event: Event):
+async def handle_ai_chat(bot: Bot, event: Event):
     if not isinstance(event, GroupMessageEvent):
         await chat_handler.finish("抱歉，当前功能仅限群聊使用哦")
         return
@@ -306,17 +293,15 @@ async def handle_gemini_chat(bot: Bot, event: Event):
     dynamic_limit = await get_dynamic_history_length(event.group_id)
     # 从 SQLite 数据库读取历史记录
     table_name = f"group_{event.group_id}"
-    conn = sqlite3.connect(DB_PATH, timeout=15.0)
-    cursor = conn.cursor()
+    rows = []
     try:
-        # 按照时间倒序抓取，使用动态长度 dynamic_limit 替代原本的 MAX_HISTORY_LENGTH
-        query = f'SELECT timestamp, sender_name, content FROM "{table_name}" WHERE message_id != ? ORDER BY timestamp DESC LIMIT ?'
-        cursor.execute(query, (str(event.message_id), dynamic_limit))
-        rows = cursor.fetchall()
-    except sqlite3.OperationalError:
+        async with aiosqlite.connect(DB_PATH, timeout=15.0) as db:
+            query = f'SELECT timestamp, sender_name, content FROM "{table_name}" WHERE message_id != ? ORDER BY timestamp DESC LIMIT ?'
+            async with db.execute(query, (str(event.message_id), dynamic_limit)) as cursor:
+                rows = await cursor.fetchall()
+    except Exception as e:
+        print(f"[AI Chat]数据库提取异常： {e}")
         rows = []
-    finally:
-        conn.close()
     # 数据库取出来是倒序的（最新的在前面），需要翻转成正序以便大模型阅读
     rows.reverse()
 
@@ -389,10 +374,7 @@ async def handle_gemini_chat(bot: Bot, event: Event):
                     reply_text = data["choices"][0]["message"]["content"].strip()
                 else:
                     # Gemini 格式解析
-                    if "content" not in data.get("candidates", [{}])[0]:
-                        reply_text = "抱歉，该回答被拦截。"
-                    else:
-                        reply_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    reply_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
         prefix_hint = f"模型：{model_config['name']}，浏览记录条数：{dynamic_limit}\n"
         msg = MessageSegment.at(event.user_id) + "\n" + MessageSegment.text(f"{prefix_hint}{reply_text}")
@@ -410,12 +392,12 @@ async def handle_gemini_chat(bot: Bot, event: Event):
                 bot_info = await bot.get_login_info()
                 bot_name = bot_info.get("nickname", "AI助手")
             except Exception as e:
-                print(f"[AI Chat] 获取机器人信息失败，使用默认名称: {e}")
+                print(f"[AI Chat] 获取机器人名称失败，使用默认名称，错误信息: {e}")
                 bot_name = "AI助手"  # 兜底名称
 
             # 存入纯文本，方便下一次作为上下文提取
             pure_reply = f"{prefix_hint}{reply_text}"
-            insert_message_to_db(bot_msg_id, event.group_id, bot_timestamp, bot_name, pure_reply)
+            await insert_message_to_db(bot_msg_id, event.group_id, bot_timestamp, bot_name, pure_reply)
 
         # 3. 结束事件
         await chat_handler.finish()

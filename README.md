@@ -45,7 +45,7 @@ COMMAND_START=["/", ""]
 在**easy_ai.py**里配置**apikey**和**api站点**，设置**白名单群**。   
 在nonebot安装目录下找到**plugins**文件夹，将**easy_ai.py**放进去即可。   
 在虚拟环境下执行`nb run`即可在当前命令窗口运行。  
-等待nonebot和napcat通信成功后，@对应qq即可触发ai回复。   
+等待nonebot和napcat通信成功后，at对应qq即可触发ai回复，at后面接"/A"、"/B"或"/C"即可切换模型。  
 注意：挂载服务（systemctl）的时候需要留意虚拟环境，建议指定虚拟环境运行，本质还是`nb run`
 
 

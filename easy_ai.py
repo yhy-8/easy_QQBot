@@ -2,6 +2,7 @@ import aiohttp
 import datetime
 import sqlite3
 import re
+import asyncio
 from nonebot import on_message, get_driver
 from nonebot.rule import to_me
 from nonebot.adapters.onebot.v11 import Bot, Event, MessageSegment, GroupMessageEvent, Message
@@ -43,8 +44,11 @@ MODELS_CONFIG = {
 
 # ========== 数据库初始化 ==========
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15.0)
     cursor = conn.cursor()
+
+    # 开启 WAL 模式，极大提升并发读写性能，减少锁冲突
+    cursor.execute('PRAGMA journal_mode=WAL;')
 
     for group_id in ALLOWED_GROUPS:
         # 表名格式：group_1058510795
@@ -69,7 +73,7 @@ init_db()
 # ========== 辅助函数：动态获取聊天记录数 ==========
 async def get_dynamic_history_length(group_id: int) -> int:
     """统计近期消息密度并让大模型决定要读取的历史消息数量"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15.0)
     cursor = conn.cursor()
     table_name = f"group_{group_id}"
     now_ts = int(datetime.datetime.now().timestamp())
@@ -142,7 +146,7 @@ async def get_dynamic_history_length(group_id: int) -> int:
         print(f"[AI Chat] 获取动态上下文长度失败: {e}")
 
     # 如果请求失败或没有拿到数字，返回一个默认值
-    return 30
+    return 80
 
 
 # ========== 辅助函数：解析消息为纯文本/占位符 ==========
@@ -197,7 +201,7 @@ def insert_message_to_db(msg_id, group_id, timestamp, sender_name, content):
         return
 
     table_name = f"group_{group_id}"
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15.0)
     cursor = conn.cursor()
     try:
         # 使用动态表名，数据部分依然使用 ? 占位符
@@ -245,7 +249,9 @@ async def sync_history_on_startup(bot: Bot):
 # ========== 2. 实时被动记录白名单群聊 ==========
 record_handler = on_message(priority=1, block=False)
 @record_handler.handle()
-async def record_chat_history(event: GroupMessageEvent):
+async def record_chat_history(event: Event):
+    if not isinstance(event, GroupMessageEvent):
+        return
     if event.group_id not in ALLOWED_GROUPS:
         return
 
@@ -300,7 +306,7 @@ async def handle_gemini_chat(bot: Bot, event: Event):
     dynamic_limit = await get_dynamic_history_length(event.group_id)
     # 从 SQLite 数据库读取历史记录
     table_name = f"group_{event.group_id}"
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15.0)
     cursor = conn.cursor()
     try:
         # 按照时间倒序抓取，使用动态长度 dynamic_limit 替代原本的 MAX_HISTORY_LENGTH
@@ -322,11 +328,10 @@ async def handle_gemini_chat(bot: Bot, event: Event):
         history_lines.append(f"[{msg_time}] {nname}: {text_content}")
 
     history_text = "\n".join(history_lines)
-    history_len = len(history_lines)
 
     if history_text.strip():
         final_prompt = (
-            f"你是群里的一位全知全能的助手，请根据下面提供的近期群聊上下文，作出答复，不要说出用户的id和名称，不要使用markdown，使用纯文本输出。\n"
+            f"你是群里的一位客观的助手，请根据下面提供的近期群聊上下文，作出答复，不要说出用户的id和名称，不要使用markdown，使用纯文本输出。\n"
             f"--- 真实群聊历史记录 ---\n"
             f"{history_text}\n"
             f"------------------------\n\n"
@@ -334,7 +339,11 @@ async def handle_gemini_chat(bot: Bot, event: Event):
             f"{user_input}"
         )
     else:
-        final_prompt = f"现在是 {current_time}，用户 {user_name} 对你说：\n{user_input}"
+        final_prompt = (
+            f"你是群里的一位客观的助手，请根据下面提供的近期群聊上下文，作出答复，不要说出用户的id和名称，不要使用markdown，使用纯文本输出。\n"
+            f"现在是 {current_time}，用户 {user_name} 对你说：\n"
+            f"{user_input}"
+        )
 
     api_type = model_config.get("api_type", "gemini")
     # 动态构建 Headers 和 Payload
@@ -370,7 +379,7 @@ async def handle_gemini_chat(bot: Bot, event: Event):
             async with session.post(current_api_url, headers=headers, json=payload, timeout=300) as resp:
                 if resp.status != 200:
                     err_msg = await resp.text()
-                    await chat_handler.finish(MessageSegment.at(event.user_id)+f"\n请求失败，状态码: {resp.status}。错误信息: {err_msg}")
+                    await chat_handler.finish(MessageSegment.at(event.user_id)+"\n"+f"（模型：{model_config['name']}）请求失败，状态码: {resp.status}"+"\n"+f"错误信息: {err_msg}")
                     return
 
                 data = await resp.json()
@@ -380,14 +389,41 @@ async def handle_gemini_chat(bot: Bot, event: Event):
                     reply_text = data["choices"][0]["message"]["content"].strip()
                 else:
                     # Gemini 格式解析
-                    reply_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    if "content" not in data.get("candidates", [{}])[0]:
+                        reply_text = "抱歉，该回答被拦截。"
+                    else:
+                        reply_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
         prefix_hint = f"模型：{model_config['name']}，浏览记录条数：{dynamic_limit}\n"
         msg = MessageSegment.at(event.user_id) + "\n" + MessageSegment.text(f"{prefix_hint}{reply_text}")
 
-        await chat_handler.finish(msg)
+        # 1. 先使用 send 发送消息，并接收返回结果以获取真实的 message_id
+        send_result = await chat_handler.send(msg)
 
+        # 2. 尝试从返回结果中提取 message_id 并存入数据库
+        if isinstance(send_result, dict) and "message_id" in send_result:
+            bot_msg_id = send_result["message_id"]
+            bot_timestamp = int(datetime.datetime.now().timestamp())
+
+            # 动态获取机器人的 QQ 昵称
+            try:
+                bot_info = await bot.get_login_info()
+                bot_name = bot_info.get("nickname", "AI助手")
+            except Exception as e:
+                print(f"[AI Chat] 获取机器人信息失败，使用默认名称: {e}")
+                bot_name = "AI助手"  # 兜底名称
+
+            # 存入纯文本，方便下一次作为上下文提取
+            pure_reply = f"{prefix_hint}{reply_text}"
+            insert_message_to_db(bot_msg_id, event.group_id, bot_timestamp, bot_name, pure_reply)
+
+        # 3. 结束事件
+        await chat_handler.finish()
+
+    except asyncio.TimeoutError:
+        await chat_handler.finish(MessageSegment.at(
+            event.user_id) + f"\n（模型：{model_config['name']}）请求超时，请稍后再试")
     except FinishedException:
         raise
     except Exception as e:
-        await chat_handler.finish(MessageSegment.at(event.user_id)+f"\n调用出错啦：{e}")
+        await chat_handler.finish(MessageSegment.at(event.user_id)+"\n"+f"（模型：{model_config['name']}）调用出错"+"\n"+f"错误信息：{e}")

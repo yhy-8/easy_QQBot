@@ -243,7 +243,8 @@ async def record_chat_history(event: Event):
         return
 
     sender_name = event.sender.nickname if event.sender and event.sender.nickname else str(event.user_id)
-    content = parse_message_content(event.message)
+    # 使用 original_message，保留at头
+    content = parse_message_content(event.original_message)
 
     await insert_message_to_db(event.message_id, event.group_id, event.time, sender_name, content)
 
@@ -396,7 +397,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
                 bot_name = "AI助手"  # 兜底名称
 
             # 存入纯文本，方便下一次作为上下文提取
-            pure_reply = f"{prefix_hint}{reply_text}"
+            pure_reply = f"[@{event.user_id}]\n{prefix_hint}{reply_text}"
             await insert_message_to_db(bot_msg_id, event.group_id, bot_timestamp, bot_name, pure_reply)
 
         # 3. 结束事件

@@ -188,6 +188,42 @@ def parse_message_content(raw_message) -> str:
     return "".join(text_parts).strip()
 
 
+# ========== 辅助函数：统一发送并存入数据库 ==========
+async def send_and_save(bot: Bot, event: GroupMessageEvent, matcher, msg, is_finish: bool = False):
+    """
+    统一发送消息并将其存入数据库。
+    msg: 可以是 Message, MessageSegment, 或 字符串
+    is_finish: 如果为 True，发送并存库后会结束当前 handler
+    """
+    # 1. 复用解析函数，完美保留 MessageSegment.at 等占位符原始信息
+    content_to_save = parse_message_content(msg)
+
+    try:
+        # 2. 发送消息
+        send_result = await matcher.send(msg)
+
+        # 3. 如果发送成功且平台返回了 message_id，则执行存库
+        if isinstance(send_result, dict) and "message_id" in send_result:
+            bot_msg_id = send_result["message_id"]
+            bot_timestamp = int(datetime.datetime.now().timestamp())
+
+            # 动态获取机器人的 QQ 昵称
+            try:
+                bot_info = await bot.get_login_info()
+                bot_name = bot_info.get("nickname", "AI助手")
+            except Exception:
+                bot_name = "AI助手"
+
+            # 异步存入数据库
+            await insert_message_to_db(bot_msg_id, event.group_id, bot_timestamp, bot_name, content_to_save)
+    except Exception as e:
+        print(f"[AI Chat] 消息发送或存库失败: {e}")
+
+    # 4. 如果需要中断后续逻辑 (替代原来的 finish)
+    if is_finish:
+        await matcher.finish()
+
+
 # ========== 辅助函数：异步写入数据库 ==========
 async def insert_message_to_db(msg_id, group_id, timestamp, sender_name, content):
     if not content or group_id not in ALLOWED_GROUPS:
@@ -263,7 +299,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
 
     user_input = event.get_plaintext().strip()
     if not user_input:
-        await chat_handler.finish(MessageSegment.at(event.user_id)+" 何意味")
+        await send_and_save(bot, event, chat_handler, MessageSegment.at(event.user_id)+" 何意味", is_finish=True)
         return
 
     selected_model_key = "default"
@@ -278,13 +314,13 @@ async def handle_ai_chat(bot: Bot, event: Event):
     current_api_url = model_config["api_url"]
 
     if not user_input:
-        await chat_handler.finish(MessageSegment.at(event.user_id)+f" （模型：{model_config['name']}）你没有输入要问的问题哦！")
+        await send_and_save(bot, event, chat_handler, MessageSegment.at(event.user_id)+f" （模型：{model_config['name']}）你没有输入要问的问题哦！", is_finish=True)
 
     # 快速回复一条
     ack_msg = MessageSegment.at(event.user_id) + MessageSegment.text(
         f"（模型：{model_config['name']}）等待API回复……"
     )
-    await chat_handler.send(ack_msg)
+    await send_and_save(bot, event, chat_handler, ack_msg, is_finish=False)
 
     current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     user_name = f"{event.sender.nickname}({event.user_id})" if event.sender and event.sender.nickname else str(
@@ -365,7 +401,8 @@ async def handle_ai_chat(bot: Bot, event: Event):
             async with session.post(current_api_url, headers=headers, json=payload, timeout=300) as resp:
                 if resp.status != 200:
                     err_msg = await resp.text()
-                    await chat_handler.finish(MessageSegment.at(event.user_id)+"\n"+f"（模型：{model_config['name']}）请求失败，状态码: {resp.status}"+"\n"+f"错误信息: {err_msg}")
+                    err_msg_text = MessageSegment.at(event.user_id) + f"\n（模型：{model_config['name']}）请求失败，状态码: {resp.status} \n错误信息: {err_msg}"
+                    await send_and_save(bot, event, chat_handler, err_msg_text, is_finish=True)
                     return
 
                 data = await resp.json()
@@ -379,34 +416,11 @@ async def handle_ai_chat(bot: Bot, event: Event):
 
         prefix_hint = f"模型：{model_config['name']}，浏览记录条数：{dynamic_limit}\n"
         msg = MessageSegment.at(event.user_id) + "\n" + MessageSegment.text(f"{prefix_hint}{reply_text}")
-
-        # 1. 先使用 send 发送消息，并接收返回结果以获取真实的 message_id
-        send_result = await chat_handler.send(msg)
-
-        # 2. 尝试从返回结果中提取 message_id 并存入数据库
-        if isinstance(send_result, dict) and "message_id" in send_result:
-            bot_msg_id = send_result["message_id"]
-            bot_timestamp = int(datetime.datetime.now().timestamp())
-
-            # 动态获取机器人的 QQ 昵称
-            try:
-                bot_info = await bot.get_login_info()
-                bot_name = bot_info.get("nickname", "AI助手")
-            except Exception as e:
-                print(f"[AI Chat] 获取机器人名称失败，使用默认名称，错误信息: {e}")
-                bot_name = "AI助手"  # 兜底名称
-
-            # 存入纯文本，方便下一次作为上下文提取
-            pure_reply = f"[@{event.user_id}]\n{prefix_hint}{reply_text}"
-            await insert_message_to_db(bot_msg_id, event.group_id, bot_timestamp, bot_name, pure_reply)
-
-        # 3. 结束事件
-        await chat_handler.finish()
+        await send_and_save(bot, event, chat_handler, msg, is_finish=True)
 
     except asyncio.TimeoutError:
-        await chat_handler.finish(MessageSegment.at(
-            event.user_id) + f"\n（模型：{model_config['name']}）请求超时，请稍后再试")
+        await send_and_save(bot, event, chat_handler, MessageSegment.at(event.user_id) + f"\n（模型：{model_config['name']}）请求超时，请稍后再试", is_finish=True)
     except FinishedException:
         raise
     except Exception as e:
-        await chat_handler.finish(MessageSegment.at(event.user_id)+"\n"+f"（模型：{model_config['name']}）调用出错"+"\n"+f"错误信息：{e}")
+        await send_and_save(bot, event, chat_handler, MessageSegment.at(event.user_id)+f"\n（模型：{model_config['name']}）调用出错 \n错误信息：{e}", is_finish=True)

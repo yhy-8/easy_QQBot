@@ -172,10 +172,16 @@ def parse_message_content(raw_message) -> str:
             # 组装纯文本
             if seg_type == "text":
                 text_parts.append(seg_data.get("text", ""))
+            elif seg_type == "reply":
+                text_parts.append("[引用回复]")
             elif seg_type == "image":
-                text_parts.append(seg_data.get("summary", "[图片]"))
+                # 尝试获取 summary，如果没有则默认空字符串
+                summary = seg_data.get("summary", "").strip()
+                # 如果 summary 真的有内容（比如 "[动画表情]"），就用它；否则用 "[图片]"
+                text_parts.append(summary if summary else "[图片]")
             elif seg_type in ["face", "mface", "bface"]:
-                text_parts.append(seg_data.get("summary", "[表情包]"))
+                summary = seg_data.get("summary", "").strip()
+                text_parts.append(summary if summary else "[表情包]")
             elif seg_type == "record":
                 text_parts.append("[语音]")
             elif seg_type == "video":
@@ -303,9 +309,15 @@ async def handle_ai_chat(bot: Bot, event: Event):
         return
 
     selected_model_key = "default"
-    for prefix in ["/A", "/B", "/C"]:
+    # 动态遍历 MODELS_CONFIG 中的所有键
+    for key in MODELS_CONFIG.keys():
+        # 跳过 default，因为默认模型不需要前缀触发
+        if key == "default":
+            continue
+
+        prefix = f"/{key}"
         if user_input.startswith(prefix):
-            selected_model_key = prefix[1:]
+            selected_model_key = key
             user_input = user_input[len(prefix):].strip()
             break
 

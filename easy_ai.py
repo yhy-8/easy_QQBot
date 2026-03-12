@@ -186,6 +186,13 @@ def parse_message_content(raw_message) -> str:
                 text_parts.append("[语音]")
             elif seg_type == "video":
                 text_parts.append("[视频]")
+            elif seg_type == "file":
+                file_name = seg_data.get("name") or seg_data.get("file") or seg_data.get("id") or "未知文件"
+                text_parts.append(f"[文件: {file_name}]")
+            elif seg_type == "forward":
+                text_parts.append("[聊天记录]")
+            elif seg_type == "node":
+                text_parts.append("[合并转发节点]")
             elif seg_type in ["json", "xml"]:
                 text_parts.append("[分享了卡片/链接]")
             elif seg_type == "at":

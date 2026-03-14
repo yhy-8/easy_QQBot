@@ -50,16 +50,28 @@ async def init_db():
         # 开启 WAL 模式
         await db.execute('PRAGMA journal_mode=WAL;')
 
+        # 创建全局昵称记录表
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS "user_info" (
+                user_id TEXT PRIMARY KEY,
+                nickname TEXT,
+                last_speak_time INTEGER
+            )
+        ''')
+
         for group_id in ALLOWED_GROUPS:
             table_name = f"group_{group_id}"
+            # 创建聊天记录表
             await db.execute(f'''
                 CREATE TABLE IF NOT EXISTS "{table_name}" (
                     message_id TEXT UNIQUE,
                     timestamp INTEGER,
                     sender_name TEXT,
+                    user_id TEXT,
                     content TEXT
                 )
             ''')
+
         await db.commit()
     print("[AI Chat] 数据库初始化完成")
 
@@ -217,53 +229,58 @@ async def parse_message_content(bot: Bot, group_id: int, raw_message) -> str:
 
 # ========== 辅助函数：统一发送并存入数据库 ==========
 async def send_and_save(bot: Bot, event: GroupMessageEvent, matcher, msg, is_finish: bool = False):
-    """
-    统一发送消息并将其存入数据库。
-    msg: 可以是 Message, MessageSegment, 或 字符串
-    is_finish: 如果为 True，发送并存库后会结束当前 handler
-    """
-    # 1. 复用解析函数，完美保留 MessageSegment.at 等占位符原始信息
     content_to_save = await parse_message_content(bot, event.group_id, msg)
 
     try:
-        # 2. 发送消息
         send_result = await matcher.send(msg)
 
-        # 3. 如果发送成功且平台返回了 message_id，则执行存库
         if isinstance(send_result, dict) and "message_id" in send_result:
             bot_msg_id = send_result["message_id"]
             bot_timestamp = int(datetime.datetime.now().timestamp())
 
-            # 动态获取机器人的 QQ 昵称
+            # 动态获取机器人的 QQ 昵称和 QQ 号
             try:
                 bot_info = await bot.get_login_info()
                 bot_name = bot_info.get("nickname", "AI助手")
+                bot_user_id = str(bot_info.get("user_id", bot.self_id))
             except Exception:
                 bot_name = "AI助手"
+                bot_user_id = str(bot.self_id)
 
-            # 异步存入数据库
-            await insert_message_to_db(bot_msg_id, event.group_id, bot_timestamp, bot_name, content_to_save)
+            # 增加 bot_user_id 传入
+            await insert_message_to_db(bot_msg_id, event.group_id, bot_timestamp, bot_name, bot_user_id, content_to_save)
     except Exception as e:
         print(f"[AI Chat] 消息发送或存库失败: {e}")
 
-    # 4. 如果需要中断后续逻辑 (替代原来的 finish)
     if is_finish:
         await matcher.finish()
 
 
 # ========== 辅助函数：异步写入数据库 ==========
-async def insert_message_to_db(msg_id, group_id, timestamp, sender_name, content):
+async def insert_message_to_db(msg_id, group_id, timestamp, sender_name, user_id, content):
     if not content or group_id not in ALLOWED_GROUPS:
         return
 
     table_name = f"group_{group_id}"
     try:
         async with aiosqlite.connect(DB_PATH, timeout=15.0) as db:
-            sql = f'INSERT OR IGNORE INTO "{table_name}" (message_id, timestamp, sender_name, content) VALUES (?, ?, ?, ?)'
-            await db.execute(sql, (str(msg_id), int(timestamp), sender_name, content))
+            # 1. 写入聊天记录表 (增加 user_id)
+            sql_chat = f'INSERT OR IGNORE INTO "{table_name}" (message_id, timestamp, sender_name, user_id, content) VALUES (?, ?, ?, ?, ?)'
+            await db.execute(sql_chat, (str(msg_id), int(timestamp), sender_name, str(user_id), content))
+
+            # 2. 写入或更新昵称表 (Upsert)
+            sql_user = '''
+                INSERT INTO "user_info" (user_id, nickname, last_speak_time)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    nickname=excluded.nickname,
+                    last_speak_time=excluded.last_speak_time
+            '''
+            await db.execute(sql_user, (str(user_id), sender_name, int(timestamp)))
+
             await db.commit()
     except Exception as e:
-        print(f"[AI Chat] 数据库错误，异步写入表 {table_name} 失败: {e}")
+        print(f"[AI Chat] 数据库错误，异步写入失败: {e}")
 
 
 # ========== 1. 机器人启动时自动拉取同步历史记录 ==========
@@ -277,15 +294,19 @@ async def sync_history_on_startup(bot: Bot):
 
             success_count = 0
             for msg in messages:
-                # 给单条消息加 try，哪怕一条解析烂了，下一条还能接着跑
                 try:
                     msg_id = msg.get("message_id")
                     timestamp = msg.get("time", 0)
-                    sender_name = msg.get("sender", {}).get("nickname", "未知")
+
+                    # 提取 sender 信息
+                    sender = msg.get("sender", {})
+                    sender_name = sender.get("nickname", "未知")
+                    user_id = str(sender.get("user_id", "未知"))
+
                     content = await parse_message_content(bot, group_id, msg.get("message", ""))
 
                     if msg_id and content:
-                        await insert_message_to_db(msg_id, group_id, timestamp, sender_name, content)
+                        await insert_message_to_db(msg_id, group_id, timestamp, sender_name, user_id, content)
                         success_count += 1
                 except Exception as inner_e:
                     print(f"[AI Chat] 解析单条历史消息失败: {inner_e}")
@@ -306,10 +327,10 @@ async def record_chat_history(bot: Bot, event: Event):
         return
 
     sender_name = event.sender.nickname if event.sender and event.sender.nickname else str(event.user_id)
-    # 使用 original_message，保留at头
+    user_id = str(event.user_id)
     content = await parse_message_content(bot, event.group_id, event.original_message)
 
-    await insert_message_to_db(event.message_id, event.group_id, event.time, sender_name, content)
+    await insert_message_to_db(event.message_id, event.group_id, event.time, sender_name, user_id, content)
 
 
 # ========== 3. 处理用户的 @ 提问 ==========

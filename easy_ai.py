@@ -147,8 +147,7 @@ async def get_dynamic_history_length(group_id: int) -> int:
 
 
 # ========== 辅助函数：解析消息为纯文本/占位符 ==========
-def parse_message_content(raw_message) -> str:
-    # 1. 处理纯字符串 (如旧版 CQ 码)
+async def parse_message_content(bot: Bot, group_id: int, raw_message) -> str:
     if isinstance(raw_message, str):
         clean_text = re.sub(r'\[CQ:[^\]]+\]', '[媒体/表情]', raw_message)
         return clean_text.strip()
@@ -196,7 +195,22 @@ def parse_message_content(raw_message) -> str:
             elif seg_type in ["json", "xml"]:
                 text_parts.append("[分享了卡片/链接]")
             elif seg_type == "at":
-                text_parts.append(f"[@{seg_data.get('qq', '某人')}]")
+                qq_id = seg_data.get('qq', '某人')
+                if qq_id == "all":
+                    text_parts.append("[@全体成员]")
+                elif str(qq_id).isdigit():
+                    try:
+                        # 主动向框架请求被艾特人的群信息
+                        member_info = await bot.get_group_member_info(group_id=group_id, user_id=int(qq_id),
+                                                                      no_cache=False)
+                        # 只取 nickname，忽略 card。如果都拿不到，退回到 qq_id
+                        name = member_info.get("nickname") or qq_id
+                        text_parts.append(f"[@{name}]")
+                    except Exception:
+                        # 如果获取失败（如退群、网络错误），兜底使用 QQ 号
+                        text_parts.append(f"[@{qq_id}]")
+                else:
+                    text_parts.append(f"[@{qq_id}]")
 
     return "".join(text_parts).strip()
 
@@ -209,7 +223,7 @@ async def send_and_save(bot: Bot, event: GroupMessageEvent, matcher, msg, is_fin
     is_finish: 如果为 True，发送并存库后会结束当前 handler
     """
     # 1. 复用解析函数，完美保留 MessageSegment.at 等占位符原始信息
-    content_to_save = parse_message_content(msg)
+    content_to_save = await parse_message_content(bot, event.group_id, msg)
 
     try:
         # 2. 发送消息
@@ -268,7 +282,7 @@ async def sync_history_on_startup(bot: Bot):
                     msg_id = msg.get("message_id")
                     timestamp = msg.get("time", 0)
                     sender_name = msg.get("sender", {}).get("nickname", "未知")
-                    content = parse_message_content(msg.get("message", ""))
+                    content = await parse_message_content(bot, group_id, msg.get("message", ""))
 
                     if msg_id and content:
                         await insert_message_to_db(msg_id, group_id, timestamp, sender_name, content)
@@ -285,7 +299,7 @@ async def sync_history_on_startup(bot: Bot):
 # ========== 2. 实时被动记录白名单群聊 ==========
 record_handler = on_message(priority=1, block=False)
 @record_handler.handle()
-async def record_chat_history(event: Event):
+async def record_chat_history(bot: Bot, event: Event):
     if not isinstance(event, GroupMessageEvent):
         return
     if event.group_id not in ALLOWED_GROUPS:
@@ -293,7 +307,7 @@ async def record_chat_history(event: Event):
 
     sender_name = event.sender.nickname if event.sender and event.sender.nickname else str(event.user_id)
     # 使用 original_message，保留at头
-    content = parse_message_content(event.original_message)
+    content = await parse_message_content(bot, event.group_id, event.original_message)
 
     await insert_message_to_db(event.message_id, event.group_id, event.time, sender_name, content)
 

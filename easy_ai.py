@@ -86,7 +86,7 @@ async def get_dynamic_history_length(group_id: int) -> int:
     rows = []
     try:
         async with aiosqlite.connect(DB_PATH, timeout=15.0) as db:
-            async with db.execute(f'SELECT timestamp FROM "{table_name}" WHERE timestamp > ? ORDER BY timestamp DESC',
+            async with db.execute(f'SELECT timestamp FROM "{table_name}" WHERE timestamp > ? ORDER BY timestamp DESC, rowid DESC',
                                   (now_ts - 7200,)) as cursor:
                 rows = await cursor.fetchall()
     except Exception as e:  # 捕获 aiosqlite 的异常
@@ -123,7 +123,7 @@ async def get_dynamic_history_length(group_id: int) -> int:
         f"你是一个用于判断群聊上下文长度的控制程序。以下是当前群聊最近2小时的活跃度统计：\n"
         f"[{stats_text}]\n"
         f"这是两个和一个ai组成的群，你需要决定接下来我需要提取多少条历史记录作为上下文给大模型。"
-        f"要求短时间内信息多的话尽可能包括半小时到一小时的数据;相反可以小一些，控制在150左右；数字最大可以到1000甚至更多。"
+        f"要求短时间内信息多的话尽可能包括半小时到一小时的数据;相反可以小一些，控制在100左右；数字最大可以到1000甚至更多。"
         f"请只回复一个纯数字，不要包含任何其他字符！"
     )
 
@@ -264,11 +264,11 @@ async def insert_message_to_db(msg_id, group_id, timestamp, sender_name, user_id
     table_name = f"group_{group_id}"
     try:
         async with aiosqlite.connect(DB_PATH, timeout=15.0) as db:
-            # 1. 写入聊天记录表 (增加 user_id)
+            # 1. 写入聊天记录表
             sql_chat = f'INSERT OR IGNORE INTO "{table_name}" (message_id, timestamp, sender_name, user_id, content) VALUES (?, ?, ?, ?, ?)'
             await db.execute(sql_chat, (str(msg_id), int(timestamp), sender_name, str(user_id), content))
 
-            # 2. 写入或更新昵称表 (Upsert)
+            # 2. 写入或更新昵称表
             sql_user = '''
                 INSERT INTO "user_info" (user_id, nickname, last_speak_time)
                 VALUES (?, ?, ?)
@@ -345,6 +345,11 @@ async def handle_ai_chat(bot: Bot, event: Event):
     if event.group_id not in ALLOWED_GROUPS:
         return
 
+    # 抢在机器人回复前，强制先把用户的触发消息存库
+    sender_name = event.sender.nickname if event.sender and event.sender.nickname else str(event.user_id)
+    user_msg_content = await parse_message_content(bot, event.group_id, event.original_message)
+    await insert_message_to_db(event.message_id, event.group_id, event.time, sender_name, str(event.user_id),user_msg_content)
+
     user_input = event.get_plaintext().strip()
     if not user_input:
         await send_and_save(bot, event, chat_handler, MessageSegment.at(event.user_id)+" 何意味", is_finish=True)
@@ -387,7 +392,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
     rows = []
     try:
         async with aiosqlite.connect(DB_PATH, timeout=15.0) as db:
-            query = f'SELECT timestamp, sender_name, content FROM "{table_name}" WHERE message_id != ? ORDER BY timestamp DESC LIMIT ?'
+            query = f'SELECT timestamp, sender_name, content FROM "{table_name}" WHERE message_id != ? ORDER BY timestamp DESC, rowid DESC LIMIT ?'
             async with db.execute(query, (str(event.message_id), dynamic_limit)) as cursor:
                 rows = await cursor.fetchall()
     except Exception as e:

@@ -18,34 +18,26 @@ MODELS_CONFIG = {
         "api_url": "https://api.deepseek.com/chat/completions",
         "name": "ds-chat",
         "api_type": "openai",
-        "model_id": "deepseek-chat",  # DeepSeek 需要在 body 传入这个
-        "vision": False, # 是否支持图片解析
-        "file": False    # 是否支持文件解析
+        "model_id": "deepseek-chat"  # DeepSeek 需要在 body 传入这个
     },
     "A": {
         "api_key": "",
         "api_url": "https://api.deepseek.com/chat/completions", # 注意: reasoner 也是这个端点
         "name": "ds-reasoner",
         "api_type": "openai",
-        "model_id": "deepseek-reasoner",
-        "vision": False,
-        "file": False
+        "model_id": "deepseek-reasoner"
     },
     "B": {
         "api_key": "",
         "api_url": "",
         "name": "gemini-3-flash",
-        "api_type": "gemini",
-        "vision": True,
-        "file": True
+        "api_type": "gemini"
     },
     "C": {
         "api_key": "",
         "api_url": "",
         "name": "gemini-3.1-pro",
-        "api_type": "gemini",
-        "vision": True,
-        "file": True
+        "api_type": "gemini"
     }
 }
 

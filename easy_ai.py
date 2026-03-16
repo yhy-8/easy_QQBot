@@ -18,26 +18,34 @@ MODELS_CONFIG = {
         "api_url": "https://api.deepseek.com/chat/completions",
         "name": "ds-chat",
         "api_type": "openai",
-        "model_id": "deepseek-chat"  # DeepSeek 需要在 body 传入这个
+        "model_id": "deepseek-chat",  # DeepSeek 需要在 body 传入这个
+        "vision": False, # 是否支持图片解析
+        "file": False    # 是否支持文件解析
     },
     "A": {
         "api_key": "",
         "api_url": "https://api.deepseek.com/chat/completions", # 注意: reasoner 也是这个端点
         "name": "ds-reasoner",
         "api_type": "openai",
-        "model_id": "deepseek-reasoner"
+        "model_id": "deepseek-reasoner",
+        "vision": False,
+        "file": False
     },
     "B": {
         "api_key": "",
         "api_url": "",
         "name": "gemini-3-flash",
-        "api_type": "gemini"
+        "api_type": "gemini",
+        "vision": True,
+        "file": True
     },
     "C": {
         "api_key": "",
         "api_url": "",
         "name": "gemini-3.1-pro",
-        "api_type": "gemini"
+        "api_type": "gemini",
+        "vision": True,
+        "file": True
     }
 }
 
@@ -360,6 +368,12 @@ async def handle_ai_chat(bot: Bot, event: Event):
     sender_name = event.sender.nickname if event.sender and event.sender.nickname else str(event.user_id)
     user_msg_content = await parse_message_content(bot, event.group_id, event.original_message)
     await insert_message_to_db(event.message_id, event.group_id, event.time, sender_name, str(event.user_id),user_msg_content)
+
+    # 如果只是引用而没有手动 @，则在此中断，不触发 AI 回复
+    has_at = any(seg.type == "at" and str(seg.data.get("qq")) == str(bot.self_id)
+                 for seg in event.original_message)
+    if not has_at:
+        await chat_handler.finish()
 
     user_input = event.get_plaintext().strip()
     if not user_input:

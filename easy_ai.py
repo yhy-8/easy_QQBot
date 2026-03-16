@@ -333,6 +333,9 @@ async def record_chat_history(bot: Bot, event: Event):
         return
     if event.group_id not in ALLOWED_GROUPS:
         return
+    # 如果消息是 @机器人的，跳过被动记录，避免与 chat_handler 竞争写入
+    if event.is_tome():
+        return
 
     sender_name = event.sender.nickname if event.sender and event.sender.nickname else str(event.user_id)
     user_id = str(event.user_id)
@@ -409,11 +412,25 @@ async def handle_ai_chat(bot: Bot, event: Event):
     # 数据库取出来是倒序的（最新的在前面），需要翻转成正序以便大模型阅读
     rows.reverse()
 
+    # 用于正则替换引用回复中的时间戳的内部函数
+    def convert_reply_time(match):
+        try:
+            ts = int(match.group(1))
+            # 转换为 月-日 时:分:秒 格式
+            dt_str = datetime.datetime.fromtimestamp(ts).strftime("%m-%d %H:%M:%S")
+            return f"[引用回复(时间：{dt_str}，发言人：{match.group(2)})]"
+        except ValueError:
+            return match.group(0)  # 如果解析出错，保持原样
+
     history_lines = []
     for row in rows:
         msg_time = datetime.datetime.fromtimestamp(row[0]).strftime("%m-%d %H:%M")
         nname = row[1]
         text_content = row[2]
+
+        # 正则匹配形如 [引用回复(时间：1710597428，发言人：某某)] 并替换
+        text_content = re.sub(r'\[引用回复\(时间：(\d+)，发言人：(.*?)\)\]', convert_reply_time, text_content)
+
         history_lines.append(f"[{msg_time}] {nname}: {text_content}")
 
     history_text = "\n".join(history_lines)

@@ -184,7 +184,15 @@ async def parse_message_content(bot: Bot, group_id: int, raw_message) -> str:
             if seg_type == "text":
                 text_parts.append(seg_data.get("text", ""))
             elif seg_type == "reply":
-                text_parts.append("[引用回复]")
+                reply_id = seg_data.get("id")
+                try:
+                    # 向框架请求原消息，获取真实时间和发送者
+                    reply_msg = await bot.get_msg(message_id=reply_id)
+                    r_time = reply_msg.get("time")
+                    r_sender = reply_msg.get("sender", {}).get("nickname", "未知")
+                    text_parts.append(f"[引用回复(时间：{r_time}，发言人：{r_sender})]")
+                except Exception:
+                    text_parts.append("[引用回复(获取信息失败)]")
             elif seg_type == "image":
                 # 尝试获取 summary，如果没有则默认空字符串
                 summary = seg_data.get("summary", "").strip()

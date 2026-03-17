@@ -13,7 +13,11 @@ from nonebot.exception import FinishedException
 # ================= 配置区域 =================
 ALLOWED_GROUPS = [12345678] #白名单群
 DB_PATH = "/qqbot/chat_history.db"  # SQLite 数据库文件路径
-IMAGE_BASE_DIR = "/path/to/your/napcat/images"  # NapCat 图片本地缓存路径
+
+# 图片本地缓存目录配置
+# 1. 如果代码和 NapCat 在同一台电脑/同一个 Docker 容器内，请保持留空 ""，程序会自动读取绝对路径。
+# 2. 如果是跨 Docker 容器部署，导致路径不通，请在此填入挂载到当前容器的绝对路径（例如 "/napcat/xxx/images"）
+IMAGE_BASE_DIR = ""
 
 MODELS_CONFIG = {
     "default": {
@@ -300,11 +304,6 @@ async def insert_message_to_db(msg_id, group_id, timestamp, sender_name, user_id
 
 # ========== 辅助函数：通过 file_id 获取本地图片并转换为 Base64 ==========
 async def get_local_image_as_base64(bot: Bot, file_id: str, max_retries: int = 5, wait_time: float = 1.0) -> str:
-    """
-    max_retries: 最大重试次数 (6次)
-    wait_time: 每次重试间隔 (0.5秒)
-    总计最多等待 3 秒钟
-    """
     if not file_id: return None
     try:
         # 1. 调用 OneBot 标准接口获取图片信息
@@ -314,21 +313,22 @@ async def get_local_image_as_base64(bot: Bot, file_id: str, max_retries: int = 5
         if not file_path_str:
             return None
 
-        # 2. 使用 pathlib 处理路径
+        # 2. 路径策略判断：自动 vs 手动覆盖
         raw_path = Path(file_path_str)
-        if raw_path.is_absolute():
-            file_path = raw_path
+        if IMAGE_BASE_DIR:
+            # 【手动模式】遇到了 Docker 隔离，直接提取图片文件名(raw_path.name)，拼接到配置的映射目录下
+            file_path = Path(IMAGE_BASE_DIR) / raw_path.name
         else:
-            file_path = Path(IMAGE_BASE_DIR) / raw_path
+            # 【自动模式】留空则完全信任 NapCat 返回的底层绝对路径
+            file_path = raw_path
 
-        # 3. 轮询等待文件落地，且确保文件大小大于 0 字节 (防止下了一半)
+        # 3. 轮询等待文件落地，确保文件大小大于 0 字节
         for attempt in range(max_retries):
             if file_path.exists() and file_path.is_file() and file_path.stat().st_size > 0:
-                break  # 文件已就绪，跳出循环
-            await asyncio.sleep(wait_time)  # 稍微睡一会儿等 NapCat 下载完
+                break
+            await asyncio.sleep(wait_time)
         else:
-            # 如果循环没有被 break 打断，说明重试次数耗尽仍然没图
-            print(f"[AI Chat] 等待本地图片落地超时，路径: {file_path}")
+            print(f"[AI Chat] 等待本地图片落地超时，预期路径: {file_path}")
             return None
 
         # 4. 使用线程池读取文件

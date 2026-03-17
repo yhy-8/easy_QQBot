@@ -4,6 +4,7 @@ import aiosqlite
 import re
 import asyncio
 import base64
+from pathlib import Path
 from nonebot import on_message, get_driver
 from nonebot.rule import to_me
 from nonebot.adapters.onebot.v11 import Bot, Event, MessageSegment, GroupMessageEvent, Message
@@ -12,6 +13,7 @@ from nonebot.exception import FinishedException
 # ================= 配置区域 =================
 ALLOWED_GROUPS = [12345678] #白名单群
 DB_PATH = "/qqbot/chat_history.db"  # SQLite 数据库文件路径
+IMAGE_BASE_DIR = "/qqbot/images"  # 图片本地缓存路径
 
 MODELS_CONFIG = {
     "default": {
@@ -296,25 +298,49 @@ async def insert_message_to_db(msg_id, group_id, timestamp, sender_name, user_id
         print(f"[AI Chat] 数据库错误，异步写入失败: {e}")
 
 
-# ========== 辅助函数：下载图片并转换为 Base64 ==========
-async def download_image_as_base64(url: str) -> str:
-    if not url: return None
+# ========== 辅助函数：通过 file_id 获取本地图片并转换为 Base64 ==========
+async def get_local_image_as_base64(bot: Bot, file_id: str) -> str:
+    if not file_id: return None
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=15) as resp:
-                if resp.status == 200:
-                    data = await resp.read()
-                    return base64.b64encode(data).decode('utf-8')
+        # 1. 调用 OneBot 标准接口获取图片信息
+        img_info = await bot.get_image(file=file_id)
+        file_path_str = img_info.get("file", "")
+
+        if not file_path_str:
+            return None
+
+        # 2. 使用 pathlib 处理路径
+        raw_path = Path(file_path_str)
+
+        # 兼容性处理：如果返回的是绝对路径，直接用；如果是相对路径或纯文件名，拼接到配置的基础路径上
+        if raw_path.is_absolute():
+            file_path = raw_path
+        else:
+            file_path = Path(IMAGE_BASE_DIR) / raw_path
+
+        # 3. 校验路径是否存在且为文件
+        if not file_path.exists() or not file_path.is_file():
+            print(f"[AI Chat] 未找到本地图片文件，预期路径: {file_path}")
+            return None
+
+        # 4. 使用线程池读取文件 (pathlib 的 read_bytes 非常简洁)
+        loop = asyncio.get_event_loop()
+
+        def read_file():
+            return base64.b64encode(file_path.read_bytes()).decode('utf-8')
+
+        return await loop.run_in_executor(None, read_file)
+
     except Exception as e:
-        print(f"[AI Chat] 图片下载转Base64失败: {e}")
+        print(f"[AI Chat] 读取本地图片转Base64失败: {e}")
     return None
 
 
 # ========== 辅助函数：专供AI理解的富文本与图片提取(分离下载) ==========
-async def extract_text_and_image_urls(bot: Bot, group_id: int, raw_message) -> tuple[str, list]:
-    """返回：(富文本字符串, 图片URL列表)"""
+async def extract_text_and_image_ids(bot: Bot, group_id: int, raw_message) -> tuple[str, list]:
+    """返回：(富文本字符串, 图片file_id列表)"""
     text_parts = []
-    image_urls = []
+    image_ids = []
 
     if hasattr(raw_message, "__iter__"):
         for seg in raw_message:
@@ -327,12 +353,13 @@ async def extract_text_and_image_urls(bot: Bot, group_id: int, raw_message) -> t
                 text_parts.append(seg_data.get("text", ""))
             elif seg_type == "at":
                 qq_id = str(seg_data.get('qq', ''))
-                if qq_id != str(bot.self_id):  # 过滤掉艾特机器人本身的标记
+                if qq_id != str(bot.self_id):
                     text_parts.append(f"[@{qq_id}]")
             elif seg_type == "image":
                 text_parts.append("[图片]")
-                if "url" in seg_data:
-                    image_urls.append(seg_data["url"])
+                # 提取 file (也就是 file_id)
+                if "file" in seg_data:
+                    image_ids.append(seg_data["file"])
             elif seg_type == "reply":
                 reply_id = seg_data.get("id")
                 try:
@@ -340,7 +367,6 @@ async def extract_text_and_image_urls(bot: Bot, group_id: int, raw_message) -> t
                     r_time_str = datetime.datetime.fromtimestamp(reply_msg.get("time", 0)).strftime("%m-%d %H:%M:%S")
                     r_sender = reply_msg.get("sender", {}).get("nickname", "未知")
 
-                    # 深度解析引用消息的具体内容
                     r_text_content = ""
                     for r_seg in reply_msg.get("message", []):
                         r_type = r_seg.get("type", "")
@@ -349,12 +375,13 @@ async def extract_text_and_image_urls(bot: Bot, group_id: int, raw_message) -> t
                             r_text_content += r_data.get("text", "")
                         elif r_type == "image":
                             r_text_content += "[图片]"
-                            if "url" in r_data:
-                                image_urls.append(r_data["url"])
+                            # 引用消息中的图片也提取 file_id
+                            if "file" in r_data:
+                                image_ids.append(r_data["file"])
                         elif r_type == "file":
                             r_text_content += f"[文件：{r_data.get('name', '未知')}]"
                         else:
-                            r_text_content += f"[{r_type}]"  # 兜底其他类型
+                            r_text_content += f"[{r_type}]"
 
                     text_parts.append(f"\n[引用回复（时间：{r_time_str}，发言人：{r_sender}，内容：{r_text_content}）]\n")
                 except Exception as e:
@@ -362,7 +389,7 @@ async def extract_text_and_image_urls(bot: Bot, group_id: int, raw_message) -> t
             elif seg_type == "file":
                 text_parts.append(f"[文件: {seg_data.get('name') or seg_data.get('file') or '未知文件'}]")
 
-    return "".join(text_parts).strip(), image_urls
+    return "".join(text_parts).strip(), image_ids
 
 
 # ========== 1. 机器人启动时自动拉取同步历史记录 ==========
@@ -458,41 +485,40 @@ async def handle_ai_chat(bot: Bot, event: Event):
     current_api_url = model_config["api_url"]
     is_vision_enabled = model_config.get("vision", False)
 
-    # 1. 瞬间提取富文本内容与图片 URLs (不下载)
-    rich_user_input, image_urls = await extract_text_and_image_urls(bot, event.group_id, event.original_message)
+    # 1. 提取富文本内容与图片 ID
+    rich_user_input, image_ids = await extract_text_and_image_ids(bot, event.group_id, event.original_message)
 
     if prefix_to_remove:
         rich_user_input = rich_user_input.replace(prefix_to_remove, "", 1).strip()
     user_input = rich_user_input.strip()
 
     # 2. 校验 1：啥都没有输入也没有图片
-    if not user_input and not image_urls:
-        await send_and_save(bot, event, chat_handler, MessageSegment.at(event.user_id) + " 何意味", is_finish=True)
+    if not user_input and not image_ids:
+        await send_and_save(bot, event, chat_handler,MessageSegment.at(event.user_id) + f"（模型：{model_config['name']}） 何意味", is_finish=True)
         return
 
     # 3. 校验 2：带了图片但当前模型不支持 Vision
-    if image_urls and not is_vision_enabled:
+    if image_ids and not is_vision_enabled:
         err_msg = MessageSegment.at(event.user_id) + f"\n（模型：{model_config['name']}）抱歉，该模型不具备图片识别能力！"
         await send_and_save(bot, event, chat_handler, err_msg, is_finish=True)
         return
 
     # 4. 通过校验，立刻返回等待提示
     ack_msg = MessageSegment.at(event.user_id) + MessageSegment.text(
-        f"（模型：{model_config['name']}）{'正在识别图片并' if image_urls else ''}等待API回复……"
+        f"\n（模型：{model_config['name']}）{'正在识别图片并' if image_ids else ''}等待API回复……"
     )
     await send_and_save(bot, event, chat_handler, ack_msg, is_finish=False)
 
-    # 5. 提示已发出，现在开始在后台下载图片转 Base64
+    # 5. 提示已发出，开始读取本地图片转 Base64
     base64_images = []
-    if image_urls:
-        for url in image_urls:
-            b64 = await download_image_as_base64(url)
+    if image_ids:
+        for file_id in image_ids:
+            b64 = await get_local_image_as_base64(bot, file_id)
             if b64:
                 base64_images.append(b64)
 
     current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    user_name = f"{event.sender.nickname}({event.user_id})" if event.sender and event.sender.nickname else str(
-        event.user_id)
+    user_name = f"{event.sender.nickname}({event.user_id})" if event.sender and event.sender.nickname else str(event.user_id)
 
     # 从数据库获取上下文历史
     dynamic_limit = await get_dynamic_history_length(event.group_id)
@@ -583,8 +609,8 @@ async def handle_ai_chat(bot: Bot, event: Event):
         if is_vision_enabled and base64_images:
             for b64 in base64_images:
                 parts.append({
-                    "inline_data": {
-                        "mime_type": "image/jpeg",
+                    "inlineData": {
+                        "mimeType": "image/jpeg",
                         "data": b64
                     }
                 })

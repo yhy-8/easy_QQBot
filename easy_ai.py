@@ -3,6 +3,7 @@ import datetime
 import aiosqlite
 import re
 import asyncio
+import base64
 from nonebot import on_message, get_driver
 from nonebot.rule import to_me
 from nonebot.adapters.onebot.v11 import Bot, Event, MessageSegment, GroupMessageEvent, Message
@@ -18,26 +19,30 @@ MODELS_CONFIG = {
         "api_url": "https://api.deepseek.com/chat/completions",
         "name": "ds-chat",
         "api_type": "openai",
-        "model_id": "deepseek-chat"  # DeepSeek 需要在 body 传入这个
+        "model_id": "deepseek-chat",  # DeepSeek 需要在 body 传入这个
+        "vision": False
     },
     "A": {
         "api_key": "",
         "api_url": "https://api.deepseek.com/chat/completions", # 注意: reasoner 也是这个端点
         "name": "ds-reasoner",
         "api_type": "openai",
-        "model_id": "deepseek-reasoner"
+        "model_id": "deepseek-reasoner",
+        "vision": False
     },
     "B": {
         "api_key": "",
         "api_url": "",
         "name": "gemini-3-flash",
-        "api_type": "gemini"
+        "api_type": "gemini",
+        "vision": True
     },
     "C": {
         "api_key": "",
         "api_url": "",
         "name": "gemini-3.1-pro",
-        "api_type": "gemini"
+        "api_type": "gemini",
+        "vision": True
     }
 }
 
@@ -291,6 +296,75 @@ async def insert_message_to_db(msg_id, group_id, timestamp, sender_name, user_id
         print(f"[AI Chat] 数据库错误，异步写入失败: {e}")
 
 
+# ========== 辅助函数：下载图片并转换为 Base64 ==========
+async def download_image_as_base64(url: str) -> str:
+    if not url: return None
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=15) as resp:
+                if resp.status == 200:
+                    data = await resp.read()
+                    return base64.b64encode(data).decode('utf-8')
+    except Exception as e:
+        print(f"[AI Chat] 图片下载转Base64失败: {e}")
+    return None
+
+
+# ========== 辅助函数：专供AI理解的富文本与图片提取(分离下载) ==========
+async def extract_text_and_image_urls(bot: Bot, group_id: int, raw_message) -> tuple[str, list]:
+    """返回：(富文本字符串, 图片URL列表)"""
+    text_parts = []
+    image_urls = []
+
+    if hasattr(raw_message, "__iter__"):
+        for seg in raw_message:
+            seg_type = seg.get("type", "") if isinstance(seg, dict) else getattr(seg, "type", "")
+            seg_data = seg.get("data", {}) if isinstance(seg, dict) else getattr(seg, "data", {})
+
+            if not seg_type: continue
+
+            if seg_type == "text":
+                text_parts.append(seg_data.get("text", ""))
+            elif seg_type == "at":
+                qq_id = str(seg_data.get('qq', ''))
+                if qq_id != str(bot.self_id):  # 过滤掉艾特机器人本身的标记
+                    text_parts.append(f"[@{qq_id}]")
+            elif seg_type == "image":
+                text_parts.append("[图片]")
+                if "url" in seg_data:
+                    image_urls.append(seg_data["url"])
+            elif seg_type == "reply":
+                reply_id = seg_data.get("id")
+                try:
+                    reply_msg = await bot.get_msg(message_id=reply_id)
+                    r_time_str = datetime.datetime.fromtimestamp(reply_msg.get("time", 0)).strftime("%m-%d %H:%M:%S")
+                    r_sender = reply_msg.get("sender", {}).get("nickname", "未知")
+
+                    # 深度解析引用消息的具体内容
+                    r_text_content = ""
+                    for r_seg in reply_msg.get("message", []):
+                        r_type = r_seg.get("type", "")
+                        r_data = r_seg.get("data", {})
+                        if r_type == "text":
+                            r_text_content += r_data.get("text", "")
+                        elif r_type == "image":
+                            r_text_content += "[图片]"
+                            if "url" in r_data:
+                                image_urls.append(r_data["url"])
+                        elif r_type == "file":
+                            r_text_content += f"[文件：{r_data.get('name', '未知')}]"
+                        else:
+                            r_text_content += f"[{r_type}]"  # 兜底其他类型
+
+                    text_parts.append(f"\n[引用回复（时间：{r_time_str}，发言人：{r_sender}，内容：{r_text_content}）]\n")
+                except Exception as e:
+                    text_parts.append("[引用回复(获取信息失败)]")
+            elif seg_type == "file":
+                text_parts.append(f"[文件: {seg_data.get('name') or seg_data.get('file') or '未知文件'}]")
+
+    return "".join(text_parts).strip(), image_urls
+
+
 # ========== 1. 机器人启动时自动拉取同步历史记录 ==========
 driver = get_driver()
 @driver.on_bot_connect
@@ -367,44 +441,61 @@ async def handle_ai_chat(bot: Bot, event: Event):
     if not has_at:
         await chat_handler.finish()
 
-    user_input = event.get_plaintext().strip()
-    if not user_input:
-        await send_and_save(bot, event, chat_handler, MessageSegment.at(event.user_id)+" 何意味", is_finish=True)
-        return
-
+    # 提取纯文本以便先判断触发了哪个模型
+    plain_text = event.get_plaintext().strip()
     selected_model_key = "default"
-    # 动态遍历 MODELS_CONFIG 中的所有键
+    prefix_to_remove = ""
     for key in MODELS_CONFIG.keys():
-        # 跳过 default，因为默认模型不需要前缀触发
-        if key == "default":
-            continue
-
+        if key == "default": continue
         prefix = f"/{key}"
-        if user_input.startswith(prefix):
+        if plain_text.startswith(prefix):
             selected_model_key = key
-            user_input = user_input[len(prefix):].strip()
+            prefix_to_remove = prefix
             break
 
     model_config = MODELS_CONFIG.get(selected_model_key, MODELS_CONFIG["default"])
     current_api_key = model_config["api_key"]
     current_api_url = model_config["api_url"]
+    is_vision_enabled = model_config.get("vision", False)
 
-    if not user_input:
-        await send_and_save(bot, event, chat_handler, MessageSegment.at(event.user_id)+f" （模型：{model_config['name']}）你没有输入要问的问题哦！", is_finish=True)
+    # 1. 瞬间提取富文本内容与图片 URLs (不下载)
+    rich_user_input, image_urls = await extract_text_and_image_urls(bot, event.group_id, event.original_message)
 
-    # 快速回复一条
+    if prefix_to_remove:
+        rich_user_input = rich_user_input.replace(prefix_to_remove, "", 1).strip()
+    user_input = rich_user_input.strip()
+
+    # 2. 校验 1：啥都没有输入也没有图片
+    if not user_input and not image_urls:
+        await send_and_save(bot, event, chat_handler, MessageSegment.at(event.user_id) + " 何意味", is_finish=True)
+        return
+
+    # 3. 校验 2：带了图片但当前模型不支持 Vision
+    if image_urls and not is_vision_enabled:
+        err_msg = MessageSegment.at(event.user_id) + f"\n（模型：{model_config['name']}）抱歉，该模型不具备图片识别能力！"
+        await send_and_save(bot, event, chat_handler, err_msg, is_finish=True)
+        return
+
+    # 4. 通过校验，立刻返回等待提示
     ack_msg = MessageSegment.at(event.user_id) + MessageSegment.text(
-        f"（模型：{model_config['name']}）等待API回复……"
+        f"（模型：{model_config['name']}）{'正在识别图片并' if image_urls else ''}等待API回复……"
     )
     await send_and_save(bot, event, chat_handler, ack_msg, is_finish=False)
+
+    # 5. 提示已发出，现在开始在后台下载图片转 Base64
+    base64_images = []
+    if image_urls:
+        for url in image_urls:
+            b64 = await download_image_as_base64(url)
+            if b64:
+                base64_images.append(b64)
 
     current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     user_name = f"{event.sender.nickname}({event.user_id})" if event.sender and event.sender.nickname else str(
         event.user_id)
 
-    # 动态获取要查询的记录条数
+    # 从数据库获取上下文历史
     dynamic_limit = await get_dynamic_history_length(event.group_id)
-    # 从 SQLite 数据库读取历史记录
     table_name = f"group_{event.group_id}"
     rows = []
     try:
@@ -415,28 +506,22 @@ async def handle_ai_chat(bot: Bot, event: Event):
     except Exception as e:
         print(f"[AI Chat]数据库提取异常： {e}")
         rows = []
-    # 数据库取出来是倒序的（最新的在前面），需要翻转成正序以便大模型阅读
     rows.reverse()
 
-    # 用于正则替换引用回复中的时间戳的内部函数
     def convert_reply_time(match):
         try:
             ts = int(match.group(1))
-            # 转换为 月-日 时:分:秒 格式
             dt_str = datetime.datetime.fromtimestamp(ts).strftime("%m-%d %H:%M:%S")
             return f"[引用回复(时间：{dt_str}，发言人：{match.group(2)})]"
         except ValueError:
-            return match.group(0)  # 如果解析出错，保持原样
+            return match.group(0)
 
     history_lines = []
     for row in rows:
         msg_time = datetime.datetime.fromtimestamp(row[0]).strftime("%m-%d %H:%M")
         nname = row[1]
         text_content = row[2]
-
-        # 正则匹配形如 [引用回复(时间：1710597428，发言人：某某)] 并替换
         text_content = re.sub(r'\[引用回复\(时间：(\d+)，发言人：(.*?)\)\]', convert_reply_time, text_content)
-
         history_lines.append(f"[{msg_time}] {nname}: {text_content}")
 
     history_text = "\n".join(history_lines)
@@ -458,30 +543,56 @@ async def handle_ai_chat(bot: Bot, event: Event):
         )
 
     api_type = model_config.get("api_type", "gemini")
-    # 动态构建 Headers 和 Payload
+
+    # Payload 组装
+
     if api_type == "openai":
-        # DeepSeek / OpenAI 格式
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {current_api_key}"
         }
+
+        # 组装 openai 兼容的内容数组
+        user_message_content = []
+        if is_vision_enabled and base64_images:
+            user_message_content.append({"type": "text", "text": final_prompt})
+            for b64 in base64_images:
+                user_message_content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
+                })
+        else:
+            user_message_content = final_prompt
+
         payload = {
             "model": model_config.get("model_id", "deepseek-chat"),
             "messages": [
-                {"role": "user", "content": final_prompt}
+                {"role": "user", "content": user_message_content}
             ],
             "stream": False
         }
+
     else:
         # Gemini 格式
         headers = {
             "Content-Type": "application/json",
             "x-goog-api-key": current_api_key
         }
+
+        parts = [{"text": final_prompt}]
+        if is_vision_enabled and base64_images:
+            for b64 in base64_images:
+                parts.append({
+                    "inline_data": {
+                        "mime_type": "image/jpeg",
+                        "data": b64
+                    }
+                })
+
         payload = {
             "contents": [{
                 "role": "user",
-                "parts": [{"text": final_prompt}]
+                "parts": parts
             }]
         }
 
@@ -498,13 +609,16 @@ async def handle_ai_chat(bot: Bot, event: Event):
                 data = await resp.json()
                 # 动态解析返回值
                 if api_type == "openai":
-                    # DeepSeek 格式解析
+                    # Openai 格式解析
                     reply_text = data["choices"][0]["message"]["content"].strip()
                 else:
                     # Gemini 格式解析
                     reply_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
         prefix_hint = f"模型：{model_config['name']}，浏览记录条数：{dynamic_limit}\n"
+        if is_vision_enabled and base64_images:
+            prefix_hint += f"，已浏览图片数：{len(base64_images)}"
+            prefix_hint += "\n"
         msg = MessageSegment.at(event.user_id) + "\n" + MessageSegment.text(f"{prefix_hint}{reply_text}")
         await send_and_save(bot, event, chat_handler, msg, is_finish=True)
 
@@ -513,4 +627,4 @@ async def handle_ai_chat(bot: Bot, event: Event):
     except FinishedException:
         raise
     except Exception as e:
-        await send_and_save(bot, event, chat_handler, MessageSegment.at(event.user_id)+f"\n（模型：{model_config['name']}）调用出错 \n错误信息：{e}", is_finish=True)
+        await send_and_save(bot, event, chat_handler, MessageSegment.at(event.user_id) + f"\n（模型：{model_config['name']}）调用出错 \n错误信息：{e}", is_finish=True)

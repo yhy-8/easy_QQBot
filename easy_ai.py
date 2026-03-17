@@ -521,13 +521,13 @@ async def handle_ai_chat(bot: Bot, event: Event):
 
     # 3. 校验 2：带了图片但当前模型不支持 Vision
     if image_ids and not is_vision_enabled:
-        err_msg = MessageSegment.at(event.user_id) + f"\n（模型：{model_config['name']}）抱歉，该模型不具备图片识别能力！"
+        err_msg = MessageSegment.at(event.user_id) + f"（模型：{model_config['name']}）该模型不具备图片识别能力！"
         await send_and_save(bot, event, chat_handler, err_msg, is_finish=True)
         return
 
     # 4. 通过校验，立刻返回等待提示
     ack_msg = MessageSegment.at(event.user_id) + MessageSegment.text(
-        f"\n（模型：{model_config['name']}）{'正在识别图片并' if image_ids else ''}等待API回复……"
+        f"（模型：{model_config['name']}，IMG：{'True' if image_ids else 'False'}）等待API回复……"
     )
     await send_and_save(bot, event, chat_handler, ack_msg, is_finish=False)
 

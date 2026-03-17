@@ -13,7 +13,7 @@ from nonebot.exception import FinishedException
 # ================= 配置区域 =================
 ALLOWED_GROUPS = [12345678] #白名单群
 DB_PATH = "/qqbot/chat_history.db"  # SQLite 数据库文件路径
-IMAGE_BASE_DIR = "/qqbot/images"  # 图片本地缓存路径
+IMAGE_BASE_DIR = "/path/to/your/napcat/images"  # NapCat 图片本地缓存路径
 
 MODELS_CONFIG = {
     "default": {
@@ -299,7 +299,12 @@ async def insert_message_to_db(msg_id, group_id, timestamp, sender_name, user_id
 
 
 # ========== 辅助函数：通过 file_id 获取本地图片并转换为 Base64 ==========
-async def get_local_image_as_base64(bot: Bot, file_id: str) -> str:
+async def get_local_image_as_base64(bot: Bot, file_id: str, max_retries: int = 5, wait_time: float = 1.0) -> str:
+    """
+    max_retries: 最大重试次数 (6次)
+    wait_time: 每次重试间隔 (0.5秒)
+    总计最多等待 3 秒钟
+    """
     if not file_id: return None
     try:
         # 1. 调用 OneBot 标准接口获取图片信息
@@ -311,21 +316,23 @@ async def get_local_image_as_base64(bot: Bot, file_id: str) -> str:
 
         # 2. 使用 pathlib 处理路径
         raw_path = Path(file_path_str)
-
-        # 兼容性处理：如果返回的是绝对路径，直接用；如果是相对路径或纯文件名，拼接到配置的基础路径上
         if raw_path.is_absolute():
             file_path = raw_path
         else:
             file_path = Path(IMAGE_BASE_DIR) / raw_path
 
-        # 3. 校验路径是否存在且为文件
-        if not file_path.exists() or not file_path.is_file():
-            print(f"[AI Chat] 未找到本地图片文件，预期路径: {file_path}")
+        # 3. 轮询等待文件落地，且确保文件大小大于 0 字节 (防止下了一半)
+        for attempt in range(max_retries):
+            if file_path.exists() and file_path.is_file() and file_path.stat().st_size > 0:
+                break  # 文件已就绪，跳出循环
+            await asyncio.sleep(wait_time)  # 稍微睡一会儿等 NapCat 下载完
+        else:
+            # 如果循环没有被 break 打断，说明重试次数耗尽仍然没图
+            print(f"[AI Chat] 等待本地图片落地超时，路径: {file_path}")
             return None
 
-        # 4. 使用线程池读取文件 (pathlib 的 read_bytes 非常简洁)
+        # 4. 使用线程池读取文件
         loop = asyncio.get_event_loop()
-
         def read_file():
             return base64.b64encode(file_path.read_bytes()).decode('utf-8')
 
@@ -554,19 +561,23 @@ async def handle_ai_chat(bot: Bot, event: Event):
 
     if history_text.strip():
         final_prompt = (
-            f"你是群里的一位客观的助手，请根据下面提供的近期群聊上下文，作出答复，不要说出用户的id和名称，不要使用markdown，使用纯文本输出。\n"
+            f"你是群里的一位客观的助手，请根据下面提供的近期群聊上下文，作出答复。要求：不要说出用户的id和名称，不要使用markdown，使用纯文本输出。\n"
             f"--- 真实群聊历史记录 ---\n"
             f"{history_text}\n"
             f"------------------------\n\n"
-            f"现在是 {current_time}，用户 {user_name} 对你说：\n"
-            f"{user_input}"
+            f"现在是 {current_time}，用户 {user_name} 正在向你提问：\n"
+            f"{user_input}\n"
         )
     else:
         final_prompt = (
-            f"你是群里的一位客观的助手，请根据下面提供的近期群聊上下文，作出答复，不要说出用户的id和名称，不要使用markdown，使用纯文本输出。\n"
-            f"现在是 {current_time}，用户 {user_name} 对你说：\n"
-            f"{user_input}"
+            f"你是群里的一位客观的助手，请作出答复。要求：不要说出用户的id和名称，不要使用markdown，使用纯文本输出。\n"
+            f"现在是 {current_time}，用户 {user_name} 正在向你提问：\n"
+            f"{user_input}\n"
         )
+
+    # 如果有图片，打上“当前附件”的强力思想钢印
+    if is_vision_enabled and base64_images:
+        final_prompt += "\n[系统重要提示：用户本次提问附带了视觉图片。请结合你的视觉能力回答上述问题。请明确：这些图片是该用户当下的提问附件，绝不是历史聊天记录中的杂图！]"
 
     api_type = model_config.get("api_type", "gemini")
 

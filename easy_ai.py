@@ -363,10 +363,18 @@ async def extract_text_and_image_ids(bot: Bot, group_id: int, raw_message) -> tu
                 if qq_id != str(bot.self_id):
                     text_parts.append(f"[@{qq_id}]")
             elif seg_type == "image":
-                text_parts.append("[图片]")
-                # 提取 file (也就是 file_id)
-                if "file" in seg_data:
-                    image_ids.append(seg_data["file"])
+                # 过滤主消息体中的表情包图片
+                summary = seg_data.get("summary", "").strip()
+                if summary:
+                    # 如果有 summary（如 [动画表情]），则视为表情，不提取 file_id
+                    text_parts.append(summary)
+                else:
+                    text_parts.append("[图片]")
+                    if "file" in seg_data:
+                        image_ids.append(seg_data["file"])
+            elif seg_type in ["face", "mface", "bface"]:
+                summary = seg_data.get("summary", "").strip()
+                text_parts.append(summary if summary else "[表情包]")
             elif seg_type == "reply":
                 reply_id = seg_data.get("id")
                 try:
@@ -381,10 +389,17 @@ async def extract_text_and_image_ids(bot: Bot, group_id: int, raw_message) -> tu
                         if r_type == "text":
                             r_text_content += r_data.get("text", "")
                         elif r_type == "image":
-                            r_text_content += "[图片]"
-                            # 引用消息中的图片也提取 file_id
-                            if "file" in r_data:
-                                image_ids.append(r_data["file"])
+                            # 过滤引用消息中的表情包图片
+                            r_summary = r_data.get("summary", "").strip()
+                            if r_summary:
+                                r_text_content += r_summary
+                            else:
+                                r_text_content += "[图片]"
+                                if "file" in r_data:
+                                    image_ids.append(r_data["file"])
+                        elif r_type in ["face", "mface", "bface"]:
+                            r_summary = r_data.get("summary", "").strip()
+                            r_text_content += (r_summary if r_summary else "[表情包]")
                         elif r_type == "file":
                             r_text_content += f"[文件：{r_data.get('name', '未知')}]"
                         else:
@@ -652,10 +667,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
                     # Gemini 格式解析
                     reply_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
-        prefix_hint = f"模型：{model_config['name']}，浏览记录条数：{dynamic_limit}"
-        if is_vision_enabled and base64_images:
-            prefix_hint += f"，浏览图片数：{len(base64_images)}"
-        prefix_hint += "\n"
+        prefix_hint = f"模型：{model_config['name']}，浏览记录条数：{dynamic_limit}，浏览图片数：{len(base64_images)}\n"
         msg = MessageSegment.at(event.user_id) + "\n" + MessageSegment.text(f"{prefix_hint}{reply_text}")
         await send_and_save(bot, event, chat_handler, msg, is_finish=True)
 

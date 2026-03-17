@@ -615,10 +615,10 @@ async def handle_ai_chat(bot: Bot, event: Event):
                     # Gemini 格式解析
                     reply_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
-        prefix_hint = f"模型：{model_config['name']}，浏览记录条数：{dynamic_limit}\n"
+        prefix_hint = f"模型：{model_config['name']}，浏览记录条数：{dynamic_limit}"
         if is_vision_enabled and base64_images:
-            prefix_hint += f"，已浏览图片数：{len(base64_images)}"
-            prefix_hint += "\n"
+            prefix_hint += f"，浏览图片数：{len(base64_images)}"
+        prefix_hint += "\n"
         msg = MessageSegment.at(event.user_id) + "\n" + MessageSegment.text(f"{prefix_hint}{reply_text}")
         await send_and_save(bot, event, chat_handler, msg, is_finish=True)
 

@@ -6,6 +6,7 @@
 一个nonebot插件  
 简单接入ai的QQBot  
 具备简单的模型可选能力  
+具备一定的图片识别能力（需要模型支持）   
 依据时间尺度的对话频率，结合ai动态调整聊天记录浏览范围
 
 ## 搭建说明
@@ -44,8 +45,13 @@ COMMAND_START=["/", ""]
 `pip install aiosqlite`   
 在**easy_ai.py**里配置**apikey**和**api站点**，设置**白名单群**。   
 在nonebot安装目录下找到**plugins**文件夹，将**easy_ai.py**放进去即可。   
-在虚拟环境下执行`nb run`即可在当前命令窗口运行。  
-等待nonebot和napcat通信成功后，at对应qq即可触发ai回复，at后面接"/A"、"/B"或"/C"即可切换模型。  
+在虚拟环境下执行`nb run`即可在当前命令窗口运行。
+
+等待nonebot和napcat通信成功后   
+at对应qq即可触发ai回复   
+at后面接"/A"、"/B"或"/C"即可切换模型    
+模型支持的情况下，引用回复图片+at对应qq，或直接图片+at对应qq，可触发图片识别 
+
 注意：挂载服务（systemctl）的时候需要留意虚拟环境，建议指定虚拟环境运行，本质还是`nb run`
 
 

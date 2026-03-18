@@ -242,6 +242,8 @@ async def parse_message_content(bot: Bot, group_id: int, raw_message) -> str:
                         text_parts.append(f"[@{qq_id}]")
                 else:
                     text_parts.append(f"[@{qq_id}]")
+            else:
+                text_parts.append(f"[{seg_type}]")
 
     return "".join(text_parts).strip()
 
@@ -360,8 +362,22 @@ async def extract_text_and_image_ids(bot: Bot, group_id: int, raw_message) -> tu
                 text_parts.append(seg_data.get("text", ""))
             elif seg_type == "at":
                 qq_id = str(seg_data.get('qq', ''))
+                # 排除 @ 机器人自己
                 if qq_id != str(bot.self_id):
-                    text_parts.append(f"[@{qq_id}]")
+                    if qq_id == "all":
+                        text_parts.append("[@全体成员]")
+                    elif qq_id.isdigit():
+                        try:
+                            # 像前面一样，主动向框架请求被艾特人的群昵称
+                            member_info = await bot.get_group_member_info(group_id=group_id, user_id=int(qq_id),
+                                                                          no_cache=False)
+                            name = member_info.get("nickname") or qq_id
+                            text_parts.append(f"[@{name}]")
+                        except Exception:
+                            # 获取失败兜底用 QQ 号
+                            text_parts.append(f"[@{qq_id}]")
+                    else:
+                        text_parts.append(f"[@{qq_id}]")
             elif seg_type == "image":
                 # 过滤主消息体中的表情包图片
                 summary = seg_data.get("summary", "").strip()
@@ -389,7 +405,6 @@ async def extract_text_and_image_ids(bot: Bot, group_id: int, raw_message) -> tu
                         if r_type == "text":
                             r_text_content += r_data.get("text", "")
                         elif r_type == "image":
-                            # 过滤引用消息中的表情包图片
                             r_summary = r_data.get("summary", "").strip()
                             if r_summary:
                                 r_text_content += r_summary
@@ -402,6 +417,16 @@ async def extract_text_and_image_ids(bot: Bot, group_id: int, raw_message) -> tu
                             r_text_content += (r_summary if r_summary else "[表情包]")
                         elif r_type == "file":
                             r_text_content += f"[文件：{r_data.get('name', '未知')}]"
+                        elif r_type == "record":
+                            r_text_content += "[语音]"
+                        elif r_type == "video":
+                            r_text_content += "[视频]"
+                        elif r_type == "forward":
+                            r_text_content += "[聊天记录]"
+                        elif r_type == "node":
+                            r_text_content += "[合并转发节点]"
+                        elif r_type in ["json", "xml"]:
+                            r_text_content += "[分享了卡片/链接]"
                         else:
                             r_text_content += f"[{r_type}]"
 
@@ -410,6 +435,18 @@ async def extract_text_and_image_ids(bot: Bot, group_id: int, raw_message) -> tu
                     text_parts.append("[引用回复(获取信息失败)]")
             elif seg_type == "file":
                 text_parts.append(f"[文件: {seg_data.get('name') or seg_data.get('file') or '未知文件'}]")
+            elif seg_type == "record":
+                text_parts.append("[语音]")
+            elif seg_type == "video":
+                text_parts.append("[视频]")
+            elif seg_type == "forward":
+                text_parts.append("[聊天记录]")
+            elif seg_type == "node":
+                text_parts.append("[合并转发节点]")
+            elif seg_type in ["json", "xml"]:
+                text_parts.append("[分享了卡片/链接]")
+            else:
+                text_parts.append(f"[{seg_type}]")
 
     return "".join(text_parts).strip(), image_ids
 

@@ -611,9 +611,15 @@ async def handle_ai_chat(bot: Bot, event: Event):
 
     history_text = "\n".join(history_lines)
 
+    system_rules = (
+        "你是群里的一位客观的AI助手，严格遵守以下【输出规范】进行回复：\n"
+        "1. 必须严格使用纯文本输出，绝对禁止使用任何 Markdown 语法（如加粗 **、列表 *、代码块 ``` 等）。\n"
+        "2. 绝对禁止在回答中重复提问者的用户ID或昵称。\n"
+        "3. 结合提供的群聊历史记录，作出答复。\n"
+    )
     if history_text.strip():
         final_prompt = (
-            f"你是群里的一位客观的助手，请根据下面提供的近期群聊上下文，作出答复。要求：不要说出用户的id和名称，不要使用markdown，使用纯文本输出。\n"
+            f"{system_rules}\n"
             f"--- 真实群聊历史记录 ---\n"
             f"{history_text}\n"
             f"------------------------\n\n"
@@ -622,7 +628,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
         )
     else:
         final_prompt = (
-            f"你是群里的一位客观的助手，请作出答复。要求：不要说出用户的id和名称，不要使用markdown，使用纯文本输出。\n"
+            f"{system_rules}\n"
             f"现在是 {current_time}，用户 {user_name} 正在向你提问：\n"
             f"{user_input}\n"
         )
@@ -702,7 +708,8 @@ async def handle_ai_chat(bot: Bot, event: Event):
                     reply_text = data["choices"][0]["message"]["content"].strip()
                 else:
                     # Gemini 格式解析
-                    reply_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    # 取数组的最后一个元素 parts[-1]。如果有parts[1]，parts[0]便是思考过程；反之没有parts[1]，parts[0]便是正文
+                    reply_text = data["candidates"][0]["content"]["parts"][-1]["text"].strip()
 
         prefix_hint = f"模型：{model_config['name']}，浏览记录条数：{len(rows)}，浏览图片数：{len(base64_images)}\n"
         msg = MessageSegment.at(event.user_id) + "\n" + MessageSegment.text(f"{prefix_hint}{reply_text}")

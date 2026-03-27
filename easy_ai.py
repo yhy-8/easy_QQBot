@@ -4,6 +4,7 @@ import aiosqlite
 import re
 import asyncio
 import base64
+import random
 from pathlib import Path
 from nonebot import on_message, get_driver
 from nonebot.rule import to_me
@@ -13,6 +14,10 @@ from nonebot.exception import FinishedException
 # ================= 配置区域 =================
 ALLOWED_GROUPS = [12345678] #白名单群
 DB_PATH = "/qqbot/chat_history.db"  # SQLite 数据库文件路径
+ENABLE_QUICK_ACK = True             # 是否开启收到提问后立刻回复“等待API回复...”的提示 (True/False)
+
+ENABLE_AI_HISTORY_DECISION = True  # 是否开启 AI 动态决定历史记录条数 (True/False)
+DYNAMIC_HISTORY_MODEL = "default"   # 决定上下文条数的模型标识 (对应 MODELS_CONFIG 中的键名，如 "default", "A")
 
 # 图片本地缓存目录配置
 # 1. 如果代码和 NapCat 在同一台电脑/同一个 Docker 容器内，请保持留空 ""，程序会自动读取绝对路径。
@@ -89,24 +94,48 @@ async def init_db():
 
 # ========== 辅助函数：动态获取聊天记录数 ==========
 async def get_dynamic_history_length(group_id: int) -> int:
-    """统计近期消息密度并让大模型决定要读取的历史消息数量"""
-    default=80 #默认值
+    """统计近期消息密度决定要读取的历史消息数量"""
+
+    # --- 提取条数限制配置区 ---
+    MIN_LIMIT = 50  # 允许提取的最小历史条数
+    MAX_LIMIT = 500  # 允许提取的最大历史条数
+    DEFAULT_LIMIT = 80  # API失败或兜底时使用的默认值
+    # -----------------------
 
     table_name = f"group_{group_id}"
     now_ts = int(datetime.datetime.now().timestamp())
     rows = []
     try:
         async with aiosqlite.connect(DB_PATH, timeout=15.0) as db:
-            async with db.execute(f'SELECT timestamp FROM "{table_name}" WHERE timestamp > ? ORDER BY timestamp DESC, rowid DESC',
-                                  (now_ts - 7200,)) as cursor:
+            async with db.execute(
+                    f'SELECT timestamp FROM "{table_name}" WHERE timestamp > ? ORDER BY timestamp DESC, rowid DESC',
+                    (now_ts - 7200,)) as cursor:
                 rows = await cursor.fetchall()
-    except Exception as e:  # 捕获 aiosqlite 的异常
-        print(f"[AI Chat]数据库查询异常 {e}")
+    except Exception as e:
+        print(f"[AI Chat] 数据库查询异常 {e}")
         rows = []
 
-    # 如果两小时内没有任何消息，直接返回兜底值，不浪费 API Token
+    # 如果两小时内没有任何消息，直接返回兜底值，不浪费资源
     if not rows:
-        return default
+        return DEFAULT_LIMIT
+
+    # ================= 分支 1: 固定算法决策逻辑 =================
+    if not ENABLE_AI_HISTORY_DECISION:
+        # 统计两个时间段的消息条数
+        count_0_to_1h = sum(1 for (ts,) in rows if now_ts - ts <= 3600)
+        count_1_to_2h = sum(1 for (ts,) in rows if 3600 < now_ts - ts <= 7200)
+
+        # 算法: 1小时内的全部消息 + 1到2小时之间的随机 50% ~ 100%
+        random_ratio = random.uniform(0.5, 1.0)
+        calculated_num = count_0_to_1h + int(count_1_to_2h * random_ratio)
+
+        # 最终值受到上下限约束
+        final_num = max(MIN_LIMIT, min(MAX_LIMIT, calculated_num))
+        # 调试输出
+        # print(f"[AI Chat] 算法决定提取条数: {final_num} (1h内:{count_0_to_1h}, 1-2h:{count_1_to_2h}, 采纳比例:{random_ratio:.2f})")
+        return final_num
+
+    # ================= 分支 2: AI 动态决策逻辑 =================
 
     # 统计各个时间段的消息量
     stats = {
@@ -129,44 +158,62 @@ async def get_dynamic_history_length(group_id: int) -> int:
 
     stats_text = ", ".join([f"{k}: {v}条" for k, v in stats.items()])
 
-    # 构建给默认模型的 Prompt
     prompt = (
         f"你是一个用于判断群聊上下文长度的控制程序。以下是当前群聊最近2小时的活跃度统计：\n"
         f"[{stats_text}]\n"
-        f"这是两个和一个ai组成的群，你需要决定接下来我需要提取多少条历史记录作为上下文给大模型。"
+        f"你需要决定接下来我需要提取多少条历史记录作为上下文给大模型。"
         f"要求短时间内信息多的话尽可能包括半小时到一小时的数据;相反可以小一些，控制在100左右；数字最大可以到1000甚至更多。"
         f"请只回复一个纯数字，不要包含任何其他字符！"
     )
 
-    # 调用 default 模型 (按你的配置是 DeepSeek)
-    default_config = MODELS_CONFIG["default"]
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {default_config['api_key']}"
-    }
-    payload = {
-        "model": default_config.get("model_id", "deepseek-chat"),
-        "messages": [{"role": "user", "content": prompt}],
-        "stream": False,
-        "temperature": 0.1  # 降低温度，让输出更稳定
-    }
+    # 动态获取配置，兼容 OpenAI 和 Gemini 格式
+    model_config = MODELS_CONFIG.get(DYNAMIC_HISTORY_MODEL, MODELS_CONFIG["default"])
+    api_type = model_config.get("api_type", "openai")
+
+    if api_type == "openai":
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {model_config['api_key']}"
+        }
+        payload = {
+            "model": model_config.get("model_id", "deepseek-chat"),
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "temperature": 0.1
+        }
+    else:  # Gemini 格式兼容
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": model_config["api_key"]
+        }
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}]
+        }
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(default_config["api_url"], headers=headers, json=payload, timeout=30) as resp:
+            async with session.post(model_config["api_url"], headers=headers, json=payload, timeout=30) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    reply = data["choices"][0]["message"]["content"].strip()
+
+                    # 按照对应格式解析回包
+                    if api_type == "openai":
+                        reply = data["choices"][0]["message"]["content"].strip()
+                    else:
+                        reply = data["candidates"][0]["content"]["parts"][-1]["text"].strip()
+
                     match = re.search(r'\d+', reply)
                     if match:
                         num = int(match.group())
-                        # 兜底限制
-                        return max(30, min(500, num))
+                        # AI 回复的数字同样受到上下限约束
+                        return max(MIN_LIMIT, min(MAX_LIMIT, num))
+                else:
+                    print(f"[AI Chat] 获取动态上下文API响应失败，状态码: {resp.status}")
     except Exception as e:
-        print(f"[AI Chat] 获取动态上下文长度失败: {e}")
+        print(f"[AI Chat] 获取动态上下文长度执行失败: {e}")
 
-    # 如果请求失败或没有拿到数字，返回一个默认值
-    return default
+    # 如果请求失败或没有匹配到数字，返回默认值
+    return DEFAULT_LIMIT
 
 
 # ========== 辅助函数：解析消息为纯文本/占位符 ==========
@@ -563,10 +610,11 @@ async def handle_ai_chat(bot: Bot, event: Event):
         return
 
     # 4. 通过校验，立刻返回等待提示
-    ack_msg = MessageSegment.at(event.user_id) + MessageSegment.text(
-        f"（模型：{model_config['name']}，IMG：{'True' if image_ids else 'False'}）等待API回复……"
-    )
-    await send_and_save(bot, event, chat_handler, ack_msg, is_finish=False)
+    if ENABLE_QUICK_ACK:
+        ack_msg = MessageSegment.at(event.user_id) + MessageSegment.text(
+            f"（模型：{model_config['name']}，IMG：{'True' if image_ids else 'False'}）等待API回复……"
+        )
+        await send_and_save(bot, event, chat_handler, ack_msg, is_finish=False)
 
     # 5. 提示已发出，开始读取本地图片转 Base64
     base64_images = []

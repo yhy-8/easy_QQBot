@@ -19,6 +19,9 @@ ENABLE_QUICK_ACK = True             # 是否开启收到提问后立刻回复“
 ENABLE_AI_HISTORY_DECISION = True  # 是否开启 AI 动态决定历史记录条数 (True/False)
 DYNAMIC_HISTORY_MODEL = "default"   # 决定上下文条数的模型标识 (对应 MODELS_CONFIG 中的键名，如 "default", "A")
 
+DYNAMIC_HISTORY_TIMEOUT = 30  # 动态决定历史记录条数(前置AI)的超时时间（秒）
+AI_CHAT_TIMEOUT = 120         # 正式聊天(正式AI)的超时时间（秒）
+
 # 图片本地缓存目录配置
 # 1. 如果代码和 NapCat 在同一台电脑/同一个 Docker 容器内，请保持留空 ""，程序会自动读取绝对路径。
 # 2. 如果是跨 Docker 容器部署，导致路径不通，请在此填入挂载到当前容器的绝对路径（例如 "/napcat/xxx/images"）
@@ -192,7 +195,7 @@ async def get_dynamic_history_length(group_id: int) -> int:
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(model_config["api_url"], headers=headers, json=payload, timeout=30) as resp:
+            async with session.post(model_config["api_url"], headers=headers, json=payload, timeout=DYNAMIC_HISTORY_TIMEOUT) as resp:
                 if resp.status == 200:
                     data = await resp.json()
 
@@ -742,7 +745,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
     # 发送请求并根据格式解析返回结果
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(current_api_url, headers=headers, json=payload, timeout=300) as resp:
+            async with session.post(current_api_url, headers=headers, json=payload, timeout=AI_CHAT_TIMEOUT) as resp:
                 if resp.status != 200:
                     err_msg = await resp.text()
                     err_msg_text = MessageSegment.at(event.user_id) + f"\n（模型：{model_config['name']}）请求失败，状态码: {resp.status} \n错误信息: {err_msg}"

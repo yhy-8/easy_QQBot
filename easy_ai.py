@@ -10,6 +10,7 @@ from nonebot import on_message, get_driver
 from nonebot.rule import to_me
 from nonebot.adapters.onebot.v11 import Bot, Event, MessageSegment, GroupMessageEvent, Message
 from nonebot.exception import FinishedException
+from uaclient.http import is_service_url
 
 # ================= 配置区域 =================
 ALLOWED_GROUPS = [12345678] #白名单群
@@ -34,7 +35,8 @@ MODELS_CONFIG = {
         "name": "ds-chat",
         "api_type": "openai",
         "model_id": "deepseek-chat",  # DeepSeek 需要在 body 传入这个
-        "vision": False
+        "vision": False,
+        "search": False
     },
     "A": {
         "api_key": "",
@@ -42,21 +44,24 @@ MODELS_CONFIG = {
         "name": "ds-reasoner",
         "api_type": "openai",
         "model_id": "deepseek-reasoner",
-        "vision": False
+        "vision": False,
+        "search": False
     },
     "B": {
         "api_key": "",
         "api_url": "",
         "name": "gemini-3-flash",
         "api_type": "gemini",
-        "vision": True
+        "vision": True,
+        "search": True
     },
     "C": {
         "api_key": "",
         "api_url": "",
         "name": "gemini-3.1-pro",
         "api_type": "gemini",
-        "vision": True
+        "vision": True,
+        "search": True
     }
 }
 
@@ -593,6 +598,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
     current_api_key = model_config["api_key"]
     current_api_url = model_config["api_url"]
     is_vision_enabled = model_config.get("vision", False)
+    is_search_enabled = model_config.get("search", False)
 
     # 1. 提取富文本内容与图片 ID
     rich_user_input, image_ids = await extract_text_and_image_ids(bot, event.group_id, event.original_message)
@@ -615,7 +621,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
     # 4. 通过校验，立刻返回等待提示
     if ENABLE_QUICK_ACK:
         ack_msg = MessageSegment.at(event.user_id) + MessageSegment.text(
-            f"（模型：{model_config['name']}，IMG：{'True' if image_ids else 'False'}）等待API回复……"
+            f"（模型：{model_config['name']}，IMG：{'T' if image_ids else 'F'}，Search：{'T' if is_search_enabled else 'F'}）等待API回复……"
         )
         await send_and_save(bot, event, chat_handler, ack_msg, is_finish=False)
 
@@ -718,6 +724,23 @@ async def handle_ai_chat(bot: Bot, event: Event):
             "stream": False
         }
 
+        if is_search_enabled:
+            model_id_lower = model_config.get("model_id", "").lower()
+
+            # 针对智谱清言 (GLM-4) 的原生联网参数
+            if "glm" in model_id_lower:
+                payload["tools"] = [{"type": "web_search", "web_search": {"enable": True}}]
+
+            # 针对 Moonshot (Kimi) 的原生联网参数
+            elif "moonshot" in model_id_lower:
+                payload["tools"] = [{"type": "builtin_function", "function": {"name": "$web_search"}}]
+
+            # 针对其他常见厂商 (如阿里通义千问) 或第三方中转的通用参数
+            else:
+                # 很多中转商或套壳 API 会读取这两个字段中的一个来开启联网
+                payload["web_search"] = True
+                payload["network"] = True
+
     else:
         # Gemini 格式
         headers = {
@@ -742,6 +765,9 @@ async def handle_ai_chat(bot: Bot, event: Event):
             }]
         }
 
+        if is_search_enabled:
+            payload["tools"] = [{"googleSearch": {}}]
+
     # 发送请求并根据格式解析返回结果
     try:
         async with aiohttp.ClientSession() as session:
@@ -753,16 +779,31 @@ async def handle_ai_chat(bot: Bot, event: Event):
                     return
 
                 data = await resp.json()
+                web_page_count = 0
                 # 动态解析返回值
                 if api_type == "openai":
                     # Openai 格式解析
                     reply_text = data["choices"][0]["message"]["content"].strip()
+                    if is_search_enabled:
+                        # 匹配常见的引用格式如 [1], [2], [^1^] 等
+                        citations = re.findall(r'\[\^?\d+\^?\]', reply_text)
+                        web_page_count = len(set(citations))
                 else:
                     # Gemini 格式解析
                     # 取数组的最后一个元素 parts[-1]。如果有parts[1]，parts[0]便是思考过程；反之没有parts[1]，parts[0]便是正文
                     reply_text = data["candidates"][0]["content"]["parts"][-1]["text"].strip()
+                    if is_search_enabled:
+                        grounding_metadata = data.get("candidates", [{}])[0].get("groundingMetadata", {})
+                        if grounding_metadata:
+                            chunks = grounding_metadata.get("groundingChunks", [])
+                            web_page_count = len([c for c in chunks if "web" in c])
 
-        prefix_hint = f"模型：{model_config['name']}，浏览记录条数：{len(rows)}，浏览图片数：{len(base64_images)}\n"
+        prefix_hint = f"模型：{model_config['name']}，浏览记录条数：{len(rows)}"
+        if is_vision_enabled:
+            prefix_hint += f"，浏览图片数：{len(base64_images)}"
+        if is_search_enabled:
+            prefix_hint += f"，浏览网页：{web_page_count}"
+        prefix_hint += "\n"
         msg = MessageSegment.at(event.user_id) + "\n" + MessageSegment.text(f"{prefix_hint}{reply_text}")
         await send_and_save(bot, event, chat_handler, msg, is_finish=True)
 

@@ -801,7 +801,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
         if is_vision_enabled:
             prefix_hint += f"，浏览图片数：{len(base64_images)}"
         if is_search_enabled:
-            prefix_hint += f"，浏览网页：{web_page_count}"
+            prefix_hint += f"，浏览网页数：{web_page_count}"
         prefix_hint += "\n"
         msg = MessageSegment.at(event.user_id) + "\n" + MessageSegment.text(f"{prefix_hint}{reply_text}")
         await send_and_save(bot, event, chat_handler, msg, is_finish=True)

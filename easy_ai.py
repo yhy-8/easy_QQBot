@@ -10,7 +10,6 @@ from nonebot import on_message, get_driver
 from nonebot.rule import to_me
 from nonebot.adapters.onebot.v11 import Bot, Event, MessageSegment, GroupMessageEvent, Message
 from nonebot.exception import FinishedException
-from uaclient.http import is_service_url
 
 # ================= 配置区域 =================
 ALLOWED_GROUPS = [12345678] #白名单群

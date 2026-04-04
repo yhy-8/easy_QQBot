@@ -522,8 +522,8 @@ async def sync_history_on_startup(bot: Bot):
 
                     # 提取 sender 信息
                     sender = msg.get("sender", {})
-                    sender_name = sender.get("nickname", "未知")
-                    user_id = str(sender.get("user_id", "未知"))
+                    sender_name = sender.get("nickname", "未知用户")
+                    user_id = str(sender.get("user_id", "未知ID"))
 
                     content = await parse_message_content(bot, group_id, msg.get("message", ""))
 
@@ -551,7 +551,7 @@ async def record_chat_history(bot: Bot, event: Event):
     if event.is_tome():
         return
 
-    sender_name = event.sender.nickname if event.sender and event.sender.nickname else str(event.user_id)
+    sender_name = event.sender.nickname if event.sender and event.sender.nickname else "未知用户"
     user_id = str(event.user_id)
     content = await parse_message_content(bot, event.group_id, event.original_message)
 
@@ -571,7 +571,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
         return
 
     # 抢在机器人回复前，强制先把用户的触发消息存库
-    sender_name = event.sender.nickname if event.sender and event.sender.nickname else str(event.user_id)
+    sender_name = event.sender.nickname if event.sender and event.sender.nickname else "未知用户"
     user_msg_content = await parse_message_content(bot, event.group_id, event.original_message)
     await insert_message_to_db(event.message_id, event.group_id, event.time, sender_name, str(event.user_id),user_msg_content)
 
@@ -598,6 +598,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
     current_api_url = model_config["api_url"]
     is_vision_enabled = model_config.get("vision", False)
     is_search_enabled = model_config.get("search", False)
+    model_information = f"模型：{model_config['name']}{'，IMG' if is_vision_enabled else ''}{'，Search' if is_search_enabled else ''}"
 
     # 1. 提取富文本内容与图片 ID
     rich_user_input, image_ids = await extract_text_and_image_ids(bot, event.group_id, event.original_message)
@@ -608,20 +609,19 @@ async def handle_ai_chat(bot: Bot, event: Event):
 
     # 2. 校验 1：啥都没有输入也没有图片
     if not user_input and not image_ids:
-        await send_and_save(bot, event, chat_handler,MessageSegment.at(event.user_id) + f"（模型：{model_config['name']}） 何意味", is_finish=True)
+        hyw_msg = MessageSegment.at(event.user_id) + f"（{model_information}）何意味"
+        await send_and_save(bot, event, chat_handler, hyw_msg, is_finish=True)
         return
 
     # 3. 校验 2：带了图片但当前模型不支持 Vision
     if image_ids and not is_vision_enabled:
-        err_msg = MessageSegment.at(event.user_id) + f"（模型：{model_config['name']}）该模型不具备图片识别能力！"
+        err_msg = MessageSegment.at(event.user_id) + f"（{model_information}）该模型不具备图片识别能力！"
         await send_and_save(bot, event, chat_handler, err_msg, is_finish=True)
         return
 
     # 4. 通过校验，立刻返回等待提示
     if ENABLE_QUICK_ACK:
-        ack_msg = MessageSegment.at(event.user_id) + MessageSegment.text(
-            f"（模型：{model_config['name']}，IMG：{'T' if image_ids else 'F'}，Search：{'T' if is_search_enabled else 'F'}）等待API回复……"
-        )
+        ack_msg = MessageSegment.at(event.user_id) + f"{model_information}）等待API回复……"
         await send_and_save(bot, event, chat_handler, ack_msg, is_finish=False)
 
     # 5. 提示已发出，开始读取本地图片转 Base64
@@ -633,7 +633,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
                 base64_images.append(b64)
 
     current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    user_name = f"{event.sender.nickname}({event.user_id})" if event.sender and event.sender.nickname else str(event.user_id)
+    user_name = event.sender.nickname if event.sender and event.sender.nickname else "未知用户"
 
     # 从数据库获取上下文历史
     dynamic_limit = await get_dynamic_history_length(event.group_id)
@@ -807,8 +807,8 @@ async def handle_ai_chat(bot: Bot, event: Event):
         await send_and_save(bot, event, chat_handler, msg, is_finish=True)
 
     except asyncio.TimeoutError:
-        await send_and_save(bot, event, chat_handler, MessageSegment.at(event.user_id) + f"\n（模型：{model_config['name']}）请求超时，请稍后再试", is_finish=True)
+        await send_and_save(bot, event, chat_handler, MessageSegment.at(event.user_id) + f"（模型：{model_config['name']}）请求超时，请稍后再试", is_finish=True)
     except FinishedException:
         raise
     except Exception as e:
-        await send_and_save(bot, event, chat_handler, MessageSegment.at(event.user_id) + f"\n（模型：{model_config['name']}）调用出错 \n错误信息：{e}", is_finish=True)
+        await send_and_save(bot, event, chat_handler, MessageSegment.at(event.user_id) + f"（模型：{model_config['name']}）调用出错 \n错误信息：{e}", is_finish=True)

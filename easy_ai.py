@@ -792,16 +792,29 @@ async def handle_ai_chat(bot: Bot, event: Event):
                     # 取数组的最后一个元素 parts[-1]。如果有parts[1]，parts[0]便是思考过程；反之没有parts[1]，parts[0]便是正文
                     reply_text = data["candidates"][0]["content"]["parts"][-1]["text"].strip()
                     if is_search_enabled:
-                        grounding_metadata = data.get("candidates", [{}])[0].get("groundingMetadata", {})
+                        candidate = data.get("candidates", [{}])[0]
+                        grounding_metadata = candidate.get("groundingMetadata", {})
+
+                        # 调试：打印中转 API 到底有没有返回 groundingMetadata
+                        print(f"[调试] grounding_metadata: {grounding_metadata}")
+
                         if grounding_metadata:
+                            # 1. 统计引用的网页块
                             chunks = grounding_metadata.get("groundingChunks", [])
                             web_page_count = len([c for c in chunks if "web" in c])
 
-        prefix_hint = f"模型：{model_config['name']}，浏览记录条数：{len(rows)}"
+                            # 2. 补充逻辑：看看是不是触发了搜索，但是没提取到具体的 chunks
+                            search_queries = grounding_metadata.get("webSearchQueries", [])
+                            if web_page_count == 0 and search_queries:
+                                # 说明触发了搜索，但 chunks 解析失败或 API 没给
+                                print(f"[调试] 触发了搜索词: {search_queries}，但未统计到网页块")
+                                web_page_count = len(search_queries)  # 勉强用搜索词条数做个保底统计
+
+        prefix_hint = f"模型：{model_config['name']}，记录：{len(rows)}"
         if is_vision_enabled:
-            prefix_hint += f"，浏览图片数：{len(base64_images)}"
+            prefix_hint += f"，图片：{len(base64_images)}"
         if is_search_enabled:
-            prefix_hint += f"，浏览网页数：{web_page_count}"
+            prefix_hint += f"，网页：{web_page_count}"
         prefix_hint += "\n"
         msg = MessageSegment.at(event.user_id) + "\n" + MessageSegment.text(f"{prefix_hint}{reply_text}")
         await send_and_save(bot, event, chat_handler, msg, is_finish=True)

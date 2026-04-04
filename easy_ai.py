@@ -621,7 +621,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
 
     # 4. 通过校验，立刻返回等待提示
     if ENABLE_QUICK_ACK:
-        ack_msg = MessageSegment.at(event.user_id) + f"{model_information}）等待API回复……"
+        ack_msg = MessageSegment.at(event.user_id) + f"（{model_information}）等待API回复……"
         await send_and_save(bot, event, chat_handler, ack_msg, is_finish=False)
 
     # 5. 提示已发出，开始读取本地图片转 Base64
@@ -693,7 +693,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
     if is_vision_enabled and base64_images:
         final_prompt += "\n[系统重要提示：用户本次提问附带了视觉图片。请结合你的视觉能力回答上述问题。请明确：这些图片是该用户当下的提问附件，绝不是历史聊天记录中的杂图！]"
 
-    api_type = model_config.get("api_type", "gemini")
+    api_type = model_config.get("api_type", "openai")
 
     # Payload 组装
 
@@ -740,7 +740,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
                 payload["web_search"] = True
                 payload["network"] = True
 
-    else:
+    elif api_type == "gemini":
         # Gemini 格式
         headers = {
             "Content-Type": "application/json",
@@ -767,6 +767,10 @@ async def handle_ai_chat(bot: Bot, event: Event):
         if is_search_enabled:
             payload["tools"] = [{"googleSearch": {}}]
 
+    else:
+        # 这里会过滤所有API格式设置错误的模型
+        await send_and_save(bot, event, chat_handler, MessageSegment.at(event.user_id) + f"（模型：{model_config['name']}）API格式设置错误！", is_finish=True)
+
     # 发送请求并根据格式解析返回结果
     try:
         async with aiohttp.ClientSession() as session:
@@ -778,16 +782,27 @@ async def handle_ai_chat(bot: Bot, event: Event):
                     return
 
                 data = await resp.json()
-                web_page_count = 0
+                search_count = 0
                 # 动态解析返回值
                 if api_type == "openai":
                     # Openai 格式解析
-                    reply_text = data["choices"][0]["message"]["content"].strip()
+                    message_obj = data.get("choices", [{}])[0].get("message", {})
+                    reply_text = message_obj.get("content", "")
+                    if reply_text:
+                        reply_text = reply_text.strip()
+
                     if is_search_enabled:
-                        # 匹配常见的引用格式如 [1], [2], [^1^] 等
-                        citations = re.findall(r'\[\^?\d+\^?\]', reply_text)
-                        web_page_count = len(set(citations))
-                else:
+                        # 检查是否有标准的 tool_calls 记录 (有些模型会把调用搜索插件的过程吐出来)
+                        tool_calls = message_obj.get("tool_calls", [])
+                        if tool_calls:
+                            search_count = len(tool_calls)
+                        else:
+                            # 检查各家中转商/国产模型常用的自定义溯源数组 (如 citations)
+                            citations = data.get("citations", [])
+                            if citations:
+                                search_count = len(citations)
+
+                elif api_type == "gemini":
                     # Gemini 格式解析
                     # 取数组的最后一个元素 parts[-1]。如果有parts[1]，parts[0]便是思考过程；反之没有parts[1]，parts[0]便是正文
                     reply_text = data["candidates"][0]["content"]["parts"][-1]["text"].strip()
@@ -795,26 +810,21 @@ async def handle_ai_chat(bot: Bot, event: Event):
                         candidate = data.get("candidates", [{}])[0]
                         grounding_metadata = candidate.get("groundingMetadata", {})
 
-                        # 调试：打印中转 API 到底有没有返回 groundingMetadata
-                        print(f"[调试] grounding_metadata: {grounding_metadata}")
-
                         if grounding_metadata:
-                            # 1. 统计引用的网页块
-                            chunks = grounding_metadata.get("groundingChunks", [])
-                            web_page_count = len([c for c in chunks if "web" in c])
-
-                            # 2. 补充逻辑：看看是不是触发了搜索，但是没提取到具体的 chunks
-                            search_queries = grounding_metadata.get("webSearchQueries", [])
-                            if web_page_count == 0 and search_queries:
-                                # 说明触发了搜索，但 chunks 解析失败或 API 没给
-                                print(f"[调试] 触发了搜索词: {search_queries}，但未统计到网页块")
-                                web_page_count = len(search_queries)  # 勉强用搜索词条数做个保底统计
+                            # 优先统计官方明确下发的搜索查询词数量
+                            queries = grounding_metadata.get("webSearchQueries", [])
+                            if queries:
+                                search_count = len(queries)
+                            else:
+                                # 如果没有搜索词，但有网页块数据，则统计有效网页块
+                                chunks = grounding_metadata.get("groundingChunks", [])
+                                search_count = len([c for c in chunks if "web" in c])
 
         prefix_hint = f"模型：{model_config['name']}，记录：{len(rows)}"
         if is_vision_enabled:
             prefix_hint += f"，图片：{len(base64_images)}"
         if is_search_enabled:
-            prefix_hint += f"，网页：{web_page_count}"
+            prefix_hint += f"，搜索：{search_count}"
         prefix_hint += "\n"
         msg = MessageSegment.at(event.user_id) + "\n" + MessageSegment.text(f"{prefix_hint}{reply_text}")
         await send_and_save(bot, event, chat_handler, msg, is_finish=True)

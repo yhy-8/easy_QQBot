@@ -786,14 +786,10 @@ async def handle_ai_chat(bot: Bot, event: Event):
                 # 动态解析返回值
                 if api_type == "openai":
                     # Openai 格式解析
-                    message_obj = data.get("choices", [{}])[0].get("message", {})
-                    reply_text = message_obj.get("content", "")
-                    if reply_text:
-                        reply_text = reply_text.strip()
-
+                    reply_text = data["choices"][0]["message"]["content"].strip()
                     if is_search_enabled:
-                        # 检查是否有标准的 tool_calls 记录 (有些模型会把调用搜索插件的过程吐出来)
-                        tool_calls = message_obj.get("tool_calls", [])
+                        # 检查是否有标准的 tool_calls 记录
+                        tool_calls = data.get("choices", [{}])[0].get("message", {}).get("tool_calls", [])
                         if tool_calls:
                             search_count = len(tool_calls)
                         else:

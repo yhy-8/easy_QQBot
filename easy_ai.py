@@ -598,7 +598,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
     current_api_url = model_config["api_url"]
     is_vision_enabled = model_config.get("vision", False)
     is_search_enabled = model_config.get("search", False)
-    model_information = f"模型：{model_config['name']}{'，IMG' if is_vision_enabled else ''}{'，Search' if is_search_enabled else ''}"
+    model_information = f"模型：{model_config['name']}{'，IMG' if is_vision_enabled else ''}{'，SRCH' if is_search_enabled else ''}"
 
     # 1. 提取富文本内容与图片 ID
     rich_user_input, image_ids = await extract_text_and_image_ids(bot, event.group_id, event.original_message)

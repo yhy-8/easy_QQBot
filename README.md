@@ -41,9 +41,9 @@ COMMAND_START=["/", ""]
 
 ### 插件安装及配置
 这个插件需要额外安装库  
-`pip install "nonebot2[fastapi]"`  
-`pip install aiohttp`    
-`pip install aiosqlite`   
+
+`pip install "nonebot2[fastapi]" aiohttp aiosqlite`
+
 在**easy_ai.py**里配置**apikey**和**api站点**，设置**白名单群**。   
 在nonebot安装目录下找到**plugins**文件夹，将**easy_ai.py**放进去即可。   
 在虚拟环境下执行`nb run`即可在当前命令窗口运行。

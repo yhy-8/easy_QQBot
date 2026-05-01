@@ -31,18 +31,18 @@ MODELS_CONFIG = {
     "default": {
         "api_key": "",
         "api_url": "https://api.deepseek.com/chat/completions",
-        "name": "ds-chat",
+        "name": "deepseek-v4-flash",
         "api_type": "openai",
-        "model_id": "deepseek-chat",  # DeepSeek 需要在 body 传入这个
+        "model_id": "deepseek-v4-flash",  # DeepSeek 需要在 body 传入这个
         "vision": False,
         "search": False
     },
     "A": {
         "api_key": "",
-        "api_url": "https://api.deepseek.com/chat/completions", # 注意: reasoner 也是这个端点
-        "name": "ds-reasoner",
+        "api_url": "https://api.deepseek.com/chat/completions",
+        "name": "deepseek-v4-pro",
         "api_type": "openai",
-        "model_id": "deepseek-reasoner",
+        "model_id": "deepseek-v4-pro",
         "vision": False,
         "search": False
     },

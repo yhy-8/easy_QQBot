@@ -31,7 +31,7 @@ MODELS_CONFIG = {
     "default": {
         "api_key": "",
         "api_url": "https://api.deepseek.com/chat/completions",
-        "name": "deepseek-v4-flash",
+        "name": "ds-v4-flash",
         "api_type": "openai",
         "model_id": "deepseek-v4-flash",  # DeepSeek 需要在 body 传入这个
         "vision": False,
@@ -40,7 +40,7 @@ MODELS_CONFIG = {
     "A": {
         "api_key": "",
         "api_url": "https://api.deepseek.com/chat/completions",
-        "name": "deepseek-v4-pro",
+        "name": "ds-v4-pro",
         "api_type": "openai",
         "model_id": "deepseek-v4-pro",
         "vision": False,

@@ -166,11 +166,15 @@ async def get_dynamic_history_length(group_id: int) -> int:
     stats_text = ", ".join([f"{k}: {v}条" for k, v in stats.items()])
 
     prompt = (
-        f"你是一个用于判断群聊上下文长度的控制程序。以下是当前群聊最近2小时的活跃度统计：\n"
-        f"[{stats_text}]\n"
-        f"你需要决定接下来我需要提取多少条历史记录作为上下文给大模型。"
-        f"要求短时间内信息多的话尽可能包括半小时到一小时的数据;相反可以小一些，控制在100左右；数字最大可以到{MAX_LIMIT}。"
-        f"请只回复一个纯数字，不要包含任何其他字符！"
+        f"你是一个用于评估对话上下文长度的计算模块。请根据以下最近2小时的群聊活跃度数据，决定需要提取的历史记录条数。\n\n"
+        f"【活跃度数据】\n"
+        f"{stats_text}\n\n"
+        f"【评估规则】\n"
+        f"1. 活跃度高（消息密集）：适当增加条数，确保上下文逻辑不断层。\n"
+        f"2. 活跃度低（消息稀疏）：适当减少条数，避免引入无关噪音和浪费计算资源。\n"
+        f"3. 提取条数必须是正整数，且最大绝对不能超过：{MAX_LIMIT}。\n\n"
+        f"【输出指令】\n"
+        f"仅输出一个纯数字。禁止包含任何标点符号、换行符、前缀或解释性文本！"
     )
 
     # 动态获取配置，兼容 OpenAI 和 Gemini 格式
@@ -598,7 +602,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
     current_api_url = model_config["api_url"]
     is_vision_enabled = model_config.get("vision", False)
     is_search_enabled = model_config.get("search", False)
-    model_information = f"模型：{model_config['name']}{'，IMG' if is_vision_enabled else ''}{'，SRCH' if is_search_enabled else ''}"
+    model_information = f"{model_config['name']}{'，IMG' if is_vision_enabled else ''}{'，SRCH' if is_search_enabled else ''}"
 
     # 1. 提取富文本内容与图片 ID
     rich_user_input, image_ids = await extract_text_and_image_ids(bot, event.group_id, event.original_message)

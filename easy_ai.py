@@ -48,17 +48,19 @@ MODELS_CONFIG = {
     },
     "B": {
         "api_key": "",
-        "api_url": "",
+        "api_url": "https://xxxxxx/v1beta/models",
         "name": "gemini-3-flash",
         "api_type": "gemini",
+        "model_id": "gemini-3-flash",
         "vision": True,
         "search": True
     },
     "C": {
         "api_key": "",
-        "api_url": "",
+        "api_url": "https://xxxxxx/v1beta/models",
         "name": "gemini-3.1-pro",
         "api_type": "gemini",
+        "model_id": "gemini-3.1-pro",
         "vision": True,
         "search": True
     }
@@ -182,6 +184,7 @@ async def get_dynamic_history_length(group_id: int) -> int:
     api_type = model_config.get("api_type", "openai")
 
     if api_type == "openai":
+        url = model_config["api_url"]
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {model_config['api_key']}"
@@ -193,6 +196,7 @@ async def get_dynamic_history_length(group_id: int) -> int:
             "temperature": 0.1
         }
     else:  # Gemini 格式兼容
+        url = f"{model_config['api_url']}/{model_config['model_id']}:generateContent"
         headers = {
             "Content-Type": "application/json",
             "x-goog-api-key": model_config["api_key"]
@@ -203,7 +207,7 @@ async def get_dynamic_history_length(group_id: int) -> int:
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(model_config["api_url"], headers=headers, json=payload, timeout=DYNAMIC_HISTORY_TIMEOUT) as resp:
+            async with session.post(url, headers=headers, json=payload, timeout=DYNAMIC_HISTORY_TIMEOUT) as resp:
                 if resp.status == 200:
                     data = await resp.json()
 
@@ -599,7 +603,11 @@ async def handle_ai_chat(bot: Bot, event: Event):
 
     model_config = MODELS_CONFIG.get(selected_model_key, MODELS_CONFIG["default"])
     current_api_key = model_config["api_key"]
-    current_api_url = model_config["api_url"]
+    api_type = model_config.get("api_type", "openai")
+    if api_type == "gemini":
+        current_api_url = f"{model_config['api_url']}/{model_config['model_id']}:generateContent"
+    else:
+        current_api_url = model_config["api_url"]
     is_vision_enabled = model_config.get("vision", False)
     is_search_enabled = model_config.get("search", False)
     model_information = f"{model_config['name']}{'，IMG' if is_vision_enabled else ''}{'，SRCH' if is_search_enabled else ''}"
@@ -699,8 +707,6 @@ async def handle_ai_chat(bot: Bot, event: Event):
     # 如果有图片，打上“当前附件”的强力思想钢印
     if is_vision_enabled and base64_images:
         final_prompt += "\n[系统重要提示：用户本次提问附带了视觉图片。请结合你的视觉能力回答上述问题。请明确：这些图片是该用户当下的提问附件，绝不是历史聊天记录中的杂图！]"
-
-    api_type = model_config.get("api_type", "openai")
 
     # Payload 组装
 
